@@ -98,6 +98,7 @@ namespace LitchiOzonRecovery
 
             InitializeControls();
             LoadAll();
+            Shown += delegate { InitializeBrowser(null, EventArgs.Empty); };
         }
 
         private void InitializeControls()
@@ -987,6 +988,16 @@ namespace LitchiOzonRecovery
                 return;
             }
 
+            if (string.IsNullOrEmpty(node.DescriptionTypeId) || node.DescriptionTypeId == "0")
+            {
+                node = FindFirstOzonLeafCategory(node);
+                if (node == null)
+                {
+                    SetStatus("Selected category has no uploadable Ozon type.");
+                    return;
+                }
+            }
+
             string categoryId = string.IsNullOrEmpty(node.DescriptionCategoryId) ? "0" : node.DescriptionCategoryId;
             string typeId = string.IsNullOrEmpty(node.DescriptionTypeId) ? "0" : node.DescriptionTypeId;
             string keyword = !string.IsNullOrEmpty(node.DescriptionTypeName)
@@ -1019,7 +1030,7 @@ namespace LitchiOzonRecovery
             }
             else if (_autoKeywordsBox != null)
             {
-                _autoKeywordsBox.Text = "home organizer";
+                _autoKeywordsBox.Text = string.Empty;
             }
         }
 
@@ -1028,7 +1039,7 @@ namespace LitchiOzonRecovery
             string text = string.IsNullOrEmpty(keyword) ? string.Empty : keyword.Trim();
             if (string.IsNullOrEmpty(text))
             {
-                return "home organizer";
+                return "general merchandise";
             }
 
             if (IsAsciiKeyword(text))
@@ -1036,68 +1047,96 @@ namespace LitchiOzonRecovery
                 return text;
             }
 
-            string lower = text.ToLowerInvariant();
+            if (ContainsAny(text, "\u60c5\u8da3", "\u6210\u4eba", "\u6027\u7231", "\u907f\u5b55", "\u5b89\u5168\u5957", "\u79c1\u5904"))
+            {
+                return "adult wellness product";
+            }
+
             string[,] map = new string[,]
             {
-                { "汽车", "car accessory" },
-                { "车", "car accessory" },
-                { "宠物", "pet supplies" },
-                { "猫", "cat supplies" },
-                { "狗", "dog supplies" },
-                { "厨房", "kitchen organizer" },
-                { "餐", "kitchen tool" },
-                { "收纳", "storage organizer" },
-                { "浴室", "bathroom organizer" },
-                { "家居", "home organizer" },
-                { "住宅", "home organizer" },
-                { "花园", "garden tool" },
-                { "办公", "office organizer" },
-                { "文具", "stationery supplies" },
-                { "书写", "writing supplies" },
-                { "旅行", "travel organizer" },
-                { "运动", "sports accessory" },
-                { "健身", "fitness accessory" },
-                { "儿童", "kids product" },
-                { "婴", "baby product" },
-                { "母婴", "baby product" },
-                { "玩具", "toy" },
-                { "清洁", "cleaning tool" },
-                { "工具", "tool accessory" },
-                { "服装", "clothing accessory" },
-                { "鞋", "shoe accessory" },
-                { "内衣", "underwear organizer" },
-                { "配饰", "fashion accessory" },
-                { "手机", "phone accessory" },
-                { "电脑", "computer accessory" },
-                { "电子", "electronics accessory" },
-                { "灯", "led light" },
-                { "节庆", "party decoration" },
-                { "装饰", "home decoration" },
-                { "美容", "beauty tool" },
-                { "化妆", "makeup organizer" },
-                { "健康", "health accessory" },
-                { "医疗", "health care accessory" },
-                { "食品", "food storage container" },
-                { "包装", "packing supplies" },
-                { "展示", "display stand" },
-                { "支架", "holder stand" },
-                { "架", "storage rack" },
-                { "盒", "storage box" },
-                { "袋", "storage bag" },
-                { "硅胶", "silicone product" },
-                { "塑料", "plastic product" }
+                { "\u6253\u5370\u8017\u6750", "printer supplies" },
+                { "\u58a8\u76d2", "printer ink cartridge" },
+                { "\u7852\u9f13", "printer toner cartridge" },
+                { "\u624b\u673a", "phone accessory" },
+                { "\u5e73\u677f", "tablet accessory" },
+                { "\u7535\u8111", "computer accessory" },
+                { "\u6570\u7801", "electronics accessory" },
+                { "\u7535\u5b50", "electronics accessory" },
+                { "\u6c7d\u8f66", "car accessory" },
+                { "\u6469\u6258", "motorcycle accessory" },
+                { "\u81ea\u884c\u8f66", "bicycle accessory" },
+                { "\u5ba0\u7269", "pet supplies" },
+                { "\u732b", "cat supplies" },
+                { "\u72d7", "dog supplies" },
+                { "\u53a8\u623f", "kitchen organizer" },
+                { "\u9910\u5177", "kitchen utensil" },
+                { "\u70d8\u7119", "baking tool" },
+                { "\u6536\u7eb3", "storage organizer" },
+                { "\u6d74\u5ba4", "bathroom organizer" },
+                { "\u536b\u6d74", "bathroom accessory" },
+                { "\u5bb6\u5c45", "home improvement product" },
+                { "\u4f4f\u5b85", "home improvement product" },
+                { "\u56ed\u827a", "garden tool" },
+                { "\u82b1\u56ed", "garden tool" },
+                { "\u529e\u516c", "office organizer" },
+                { "\u6587\u5177", "stationery supplies" },
+                { "\u4e66\u5199", "writing supplies" },
+                { "\u65c5\u884c", "travel organizer" },
+                { "\u884c\u674e", "travel organizer" },
+                { "\u8fd0\u52a8", "sports accessory" },
+                { "\u5065\u8eab", "fitness accessory" },
+                { "\u6237\u5916", "outdoor accessory" },
+                { "\u513f\u7ae5", "kids product" },
+                { "\u5a74\u513f", "baby product" },
+                { "\u6bcd\u5a74", "baby product" },
+                { "\u73a9\u5177", "kids toy" },
+                { "\u6e05\u6d01", "cleaning tool" },
+                { "\u5de5\u5177", "tool accessory" },
+                { "\u670d\u88c5", "clothing accessory" },
+                { "\u978b", "shoe accessory" },
+                { "\u5185\u8863", "underwear organizer" },
+                { "\u914d\u9970", "fashion accessory" },
+                { "\u706f", "led light" },
+                { "\u8282\u5e86", "party decoration" },
+                { "\u88c5\u9970", "home decoration" },
+                { "\u7f8e\u5bb9", "beauty tool" },
+                { "\u5316\u5986", "makeup organizer" },
+                { "\u62a4\u80a4", "skin care tool" },
+                { "\u5065\u5eb7", "health care product" },
+                { "\u533b\u7597", "health care accessory" },
+                { "\u98df\u54c1", "food storage container" },
+                { "\u5305\u88c5", "packing supplies" },
+                { "\u5c55\u793a", "display stand" },
+                { "\u652f\u67b6", "holder stand" },
+                { "\u67b6", "storage rack" },
+                { "\u76d2", "storage box" },
+                { "\u888b", "storage bag" },
+                { "\u7845\u80f6", "silicone product" },
+                { "\u5851\u6599", "plastic product" }
             };
 
             for (int i = 0; i < map.GetLength(0); i++)
             {
-                if (text.IndexOf(map[i, 0], StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    lower.IndexOf(map[i, 0].ToLowerInvariant(), StringComparison.OrdinalIgnoreCase) >= 0)
+                if (text.IndexOf(map[i, 0], StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return map[i, 1];
                 }
             }
 
-            return "home organizer";
+            return "general merchandise";
+        }
+
+        private bool ContainsAny(string text, params string[] needles)
+        {
+            for (int i = 0; i < needles.Length; i++)
+            {
+                if (text.IndexOf(needles[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private bool IsAsciiKeyword(string text)
@@ -1425,21 +1464,22 @@ namespace LitchiOzonRecovery
 
                 for (int i = 0; i < loopCount; i++)
                 {
-                    FeeRule rule = PickRandomSecondLevelRule();
-                    if (rule == null)
+                    CategoryNode category = PickRandomOzonLeafCategory();
+                    if (category == null)
                     {
-                        report.AppendLine("第 " + (i + 1) + " 轮：没有可用二级类目，停止。");
+                        report.AppendLine("Round " + (i + 1) + ": no usable Ozon leaf category; stopped.");
                         break;
                     }
 
+                    string categoryKeyword = !string.IsNullOrEmpty(category.DescriptionTypeName) ? category.DescriptionTypeName : category.DescriptionCategoryName;
                     _mainTabs.SelectedIndex = 3;
-                    FillAutomationCategory(rule.CategoryId1.ToString(), rule.CategoryId2.ToString(), rule.Category2);
+                    FillAutomationCategory(category.DescriptionCategoryId, category.DescriptionTypeId, categoryKeyword);
                     await Task.Delay(300);
 
                     report.AppendLine();
-                    report.AppendLine("第 " + (i + 1) + " 轮");
-                    report.AppendLine("类目：" + rule.Category1 + " / " + rule.Category2 + " [" + rule.CategoryId1 + "/" + rule.CategoryId2 + "]");
-                    report.AppendLine("关键词：" + rule.Category2);
+                    report.AppendLine("Round " + (i + 1));
+                    report.AppendLine("Ozon category: " + category.DescriptionCategoryName + " / " + category.DescriptionTypeName + " [" + category.DescriptionCategoryId + "/" + category.DescriptionTypeId + "]");
+                    report.AppendLine("Keyword: " + categoryKeyword);
 
                     _mainTabs.SelectedIndex = 6;
                     SourcingOptions options = ReadSourcingOptions();
@@ -1458,21 +1498,34 @@ namespace LitchiOzonRecovery
 
                     try
                     {
-                    OzonImportResult uploadResult = _automationService.UploadToOzon(
-                        uploadProducts,
-                        options,
-                        _ozonClientIdBox.Text.Trim(),
-                        _ozonApiKeyBox.Text.Trim());
+                        OzonImportResult uploadResult = _automationService.UploadToOzon(
+                            uploadProducts,
+                            options,
+                            _ozonClientIdBox.Text.Trim(),
+                            _ozonApiKeyBox.Text.Trim());
 
-                    if (uploadResult.Success)
-                    {
-                        report.AppendLine("上传：已提交 " + uploadProducts.Count + " 个商品，task_id=" + SafeValue(uploadResult.TaskId));
-                    }
-                    else
-                    {
-                        report.AppendLine("上传失败：" + uploadResult.ErrorMessage);
-                    }
+                        if (uploadResult.Success)
+                        {
+                            report.AppendLine("Ozon task submitted: " + uploadProducts.Count + " items, task_id=" + SafeValue(uploadResult.TaskId));
 
+                            OzonImportResult importResult = await Task.Run(() => _automationService.WaitForOzonImportInfo(
+                                uploadResult.TaskId,
+                                _ozonClientIdBox.Text.Trim(),
+                                _ozonApiKeyBox.Text.Trim(),
+                                12,
+                                10000));
+
+                            report.AppendLine("Ozon import result:");
+                            report.AppendLine(importResult.ImportSummary);
+                            if (!importResult.Success)
+                            {
+                                report.AppendLine("Ozon import was not accepted. Check missing attributes/category requirements above.");
+                            }
+                        }
+                        else
+                        {
+                            report.AppendLine("Ozon upload failed: " + uploadResult.ErrorMessage);
+                        }
                     }
                     catch (Exception uploadEx)
                     {
@@ -1525,6 +1578,68 @@ namespace LitchiOzonRecovery
             }
 
             return candidates[_random.Next(candidates.Count)];
+        }
+
+        private CategoryNode PickRandomOzonLeafCategory()
+        {
+            EnsureSnapshot();
+            List<CategoryNode> candidates = new List<CategoryNode>();
+            CollectOzonLeafCategories(_snapshot == null ? null : _snapshot.Categories, candidates);
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            return candidates[_random.Next(candidates.Count)];
+        }
+
+        private void CollectOzonLeafCategories(IList<CategoryNode> nodes, IList<CategoryNode> output)
+        {
+            for (int i = 0; nodes != null && i < nodes.Count; i++)
+            {
+                CategoryNode node = nodes[i];
+                if (node == null || node.Disabled)
+                {
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(node.DescriptionCategoryId) &&
+                    !string.IsNullOrEmpty(node.DescriptionTypeId) &&
+                    node.DescriptionCategoryId != "0" &&
+                    node.DescriptionTypeId != "0")
+                {
+                    output.Add(node);
+                }
+
+                CollectOzonLeafCategories(node.Children, output);
+            }
+        }
+
+        private CategoryNode FindFirstOzonLeafCategory(CategoryNode node)
+        {
+            if (node == null || node.Disabled)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrEmpty(node.DescriptionCategoryId) &&
+                !string.IsNullOrEmpty(node.DescriptionTypeId) &&
+                node.DescriptionCategoryId != "0" &&
+                node.DescriptionTypeId != "0")
+            {
+                return node;
+            }
+
+            for (int i = 0; node.Children != null && i < node.Children.Count; i++)
+            {
+                CategoryNode found = FindFirstOzonLeafCategory(node.Children[i]);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+
+            return null;
         }
 
         private List<SourceProduct> PickProductsForUpload(IList<SourceProduct> products)
@@ -1844,7 +1959,7 @@ namespace LitchiOzonRecovery
             return (value ?? string.Empty).Replace("\\", "\\\\").Replace("'", "\\'");
         }
 
-        private void UploadSelectedToOzon(object sender, EventArgs e)
+        private async void UploadSelectedToOzon(object sender, EventArgs e)
         {
             try
             {
@@ -1874,9 +1989,24 @@ namespace LitchiOzonRecovery
                 {
                     AppendAutomationLog("Ozon task id: " + result.TaskId);
                     Clipboard.SetText(result.TaskId);
+                    SetStatus("Ozon task submitted; checking import result...");
+
+                    OzonImportResult importResult = await Task.Run(() => _automationService.WaitForOzonImportInfo(
+                        result.TaskId,
+                        _ozonClientIdBox.Text.Trim(),
+                        _ozonApiKeyBox.Text.Trim(),
+                        12,
+                        10000));
+
+                    AppendAutomationLog("Ozon import result: " + importResult.ImportSummary);
+                    if (!importResult.Success)
+                    {
+                        SetStatus("Ozon import returned errors. See automation log.");
+                        return;
+                    }
                 }
 
-                SetStatus("Ozon upload submitted. Task id copied when available.");
+                SetStatus("Ozon import accepted. Products may still need Ozon moderation.");
             }
             catch (Exception ex)
             {

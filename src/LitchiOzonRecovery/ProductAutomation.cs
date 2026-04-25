@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -34,6 +35,9 @@ namespace LitchiOzonRecovery
     {
         public string OfferId { get; set; }
         public string Title { get; set; }
+        public string RussianTitle { get; set; }
+        public string RussianDescription { get; set; }
+        public string EnglishKeyword { get; set; }
         public string SourceUrl { get; set; }
         public decimal PriceCny { get; set; }
         public string PriceText { get; set; }
@@ -43,6 +47,7 @@ namespace LitchiOzonRecovery
         public string MainImage { get; set; }
         public List<string> Images { get; set; }
         public Dictionary<string, string> Attributes { get; set; }
+        public Dictionary<long, string> OzonAttributes { get; set; }
         public string Keyword { get; set; }
         public decimal Score { get; set; }
         public string Decision { get; set; }
@@ -52,6 +57,7 @@ namespace LitchiOzonRecovery
         {
             Images = new List<string>();
             Attributes = new Dictionary<string, string>();
+            OzonAttributes = new Dictionary<long, string>();
         }
     }
 
@@ -73,6 +79,8 @@ namespace LitchiOzonRecovery
         public string TaskId { get; set; }
         public string RawResponse { get; set; }
         public string ErrorMessage { get; set; }
+        public string ImportInfoResponse { get; set; }
+        public string ImportSummary { get; set; }
     }
 
     internal sealed class ProductAutomationService
@@ -82,6 +90,8 @@ namespace LitchiOzonRecovery
         private const string DingdanxiaSearchEndpoint = "https://api.dingdanxia.com/1688/item_search";
         private const string DingdanxiaDetailEndpoint = "https://api.dingdanxia.com/1688/item_get";
         private const string OzonSellerApiBaseUrl = "https://api-seller.ozon.ru";
+        private const string DeepSeekChatEndpoint = "https://api.deepseek.com/chat/completions";
+        private const string DeepSeekApiKeyEnvVar = "DEEPSEEK_API_KEY";
         private static bool _tlsInitialized;
 
         public SourcingResult Collect1688Candidates(IList<SourcingSeed> seeds, AppConfig config, SourcingOptions options)
@@ -178,6 +188,7 @@ namespace LitchiOzonRecovery
             }
 
             JArray items = new JArray();
+            JArray categoryAttributes = LoadOzonCategoryAttributes(options, clientId, apiKey);
             for (int i = 0; i < products.Count; i++)
             {
                 SourceProduct product = products[i];
@@ -186,6 +197,7 @@ namespace LitchiOzonRecovery
                     continue;
                 }
 
+                EnrichProductWithDeepSeek(product, options, categoryAttributes);
                 items.Add(BuildOzonImportItem(product, options));
             }
 
@@ -209,10 +221,273 @@ namespace LitchiOzonRecovery
             return PostOzonJson("/v1/product/import/info", payload.ToString(Formatting.None), clientId, apiKey);
         }
 
+        private JArray LoadOzonCategoryAttributes(SourcingOptions options, string clientId, string apiKey)
+        {
+            try
+            {
+                if (options == null || options.OzonCategoryId <= 0 || options.OzonTypeId <= 0)
+                {
+                    return new JArray();
+                }
+
+                JObject payload = new JObject();
+                payload["description_category_id"] = options.OzonCategoryId;
+                payload["type_id"] = options.OzonTypeId;
+                payload["language"] = "RU";
+                JObject root = JObject.Parse(PostOzonJson("/v1/description-category/attribute", payload.ToString(Formatting.None), clientId, apiKey));
+                JArray result = root["result"] as JArray;
+                return result ?? new JArray();
+            }
+            catch
+            {
+                return new JArray();
+            }
+        }
+
+        public OzonImportResult WaitForOzonImportInfo(string taskId, string clientId, string apiKey, int attempts, int delayMs)
+        {
+            OzonImportResult result = new OzonImportResult();
+            result.TaskId = taskId;
+            if (string.IsNullOrEmpty(taskId))
+            {
+                result.Success = false;
+                result.ErrorMessage = "Ozon returned no task_id.";
+                return result;
+            }
+
+            int count = attempts <= 0 ? 6 : attempts;
+            int wait = delayMs <= 0 ? 5000 : delayMs;
+            string lastResponse = string.Empty;
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0)
+                {
+                    Thread.Sleep(wait);
+                }
+
+                lastResponse = GetOzonImportInfo(taskId, clientId, apiKey);
+                string summary = BuildOzonImportSummary(lastResponse);
+                if (!IsImportStillProcessing(summary))
+                {
+                    result.Success = !HasImportErrors(summary);
+                    result.ImportInfoResponse = lastResponse;
+                    result.ImportSummary = summary;
+                    return result;
+                }
+            }
+
+            result.Success = false;
+            result.ImportInfoResponse = lastResponse;
+            result.ImportSummary = "Ozon import task is still processing. task_id=" + taskId + Environment.NewLine +
+                BuildOzonImportSummary(lastResponse);
+            return result;
+        }
+
+        public string BuildOzonImportSummary(string response)
+        {
+            if (string.IsNullOrEmpty(response))
+            {
+                return "Empty Ozon import info response.";
+            }
+
+            try
+            {
+                JObject root = JObject.Parse(response);
+                StringBuilder builder = new StringBuilder();
+                JToken result = root["result"] ?? root;
+                string taskStatus = FirstTokenString(result, "status", "state", "task_status");
+                if (!string.IsNullOrEmpty(taskStatus))
+                {
+                    builder.AppendLine("task status: " + taskStatus);
+                }
+
+                JArray items = FindArray(result, "items", "products", "errors");
+                if (items == null || items.Count == 0)
+                {
+                    string message = FirstTokenString(root, "message", "error");
+                    if (!string.IsNullOrEmpty(message))
+                    {
+                        builder.AppendLine("message: " + message);
+                    }
+
+                    if (builder.Length == 0)
+                    {
+                        builder.AppendLine("No item-level result yet; Ozon may still be processing.");
+                    }
+
+                    return builder.ToString().Trim();
+                }
+
+                int ok = 0;
+                int failed = 0;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    JObject item = items[i] as JObject;
+                    if (item == null)
+                    {
+                        continue;
+                    }
+
+                    string offerId = FirstTokenString(item, "offer_id", "offerId", "article");
+                    string status = FirstTokenString(item, "status", "state");
+                    JArray errors = FindArray(item, "errors", "error");
+                    bool hasErrors = errors != null && errors.Count > 0;
+                    if (hasErrors || status.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        status.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        failed += 1;
+                        builder.AppendLine("failed: " + SafeText(offerId) + " " + SafeText(status));
+                        AppendErrorMessages(builder, errors);
+                    }
+                    else
+                    {
+                        ok += 1;
+                        builder.AppendLine("accepted: " + SafeText(offerId) + " " + SafeText(status));
+                    }
+                }
+
+                builder.Insert(0, "items accepted=" + ok + ", failed=" + failed + Environment.NewLine);
+                return builder.ToString().Trim();
+            }
+            catch (Exception ex)
+            {
+                return "Could not parse Ozon import info: " + ex.Message + Environment.NewLine + response;
+            }
+        }
+
+        private static bool HasImportErrors(string summary)
+        {
+            if (string.IsNullOrEmpty(summary))
+            {
+                return true;
+            }
+
+            string lower = summary.ToLowerInvariant();
+            if (lower.IndexOf("failed=0", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                lower.IndexOf("failed:", StringComparison.OrdinalIgnoreCase) < 0 &&
+                lower.IndexOf("error:", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            return lower.IndexOf("failed:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("error:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("could not parse", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsImportStillProcessing(string summary)
+        {
+            if (string.IsNullOrEmpty(summary))
+            {
+                return true;
+            }
+
+            string lower = summary.ToLowerInvariant();
+            return lower.IndexOf("processing", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("pending", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("no item-level result yet", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         public void ExportCandidates(string path, IList<SourceProduct> products)
         {
             JArray array = JArray.FromObject(products ?? new List<SourceProduct>());
             File.WriteAllText(path, array.ToString(Formatting.Indented), new UTF8Encoding(false));
+        }
+
+        private static string FirstTokenString(JToken token, params string[] names)
+        {
+            if (token == null)
+            {
+                return string.Empty;
+            }
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                JToken child = token[names[i]];
+                if (child != null && child.Type != JTokenType.Null)
+                {
+                    string text = Convert.ToString(child);
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        return text.Trim();
+                    }
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static JArray FindArray(JToken token, params string[] names)
+        {
+            if (token == null)
+            {
+                return null;
+            }
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                JToken direct = token[names[i]];
+                if (direct is JArray)
+                {
+                    return (JArray)direct;
+                }
+
+                if (direct != null)
+                {
+                    JArray nested = FindArray(direct, names);
+                    if (nested != null)
+                    {
+                        return nested;
+                    }
+                }
+            }
+
+            JObject obj = token as JObject;
+            if (obj != null)
+            {
+                foreach (JProperty property in obj.Properties())
+                {
+                    if (property.Value is JArray)
+                    {
+                        for (int i = 0; i < names.Length; i++)
+                        {
+                            if (property.Name.IndexOf(names[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                return (JArray)property.Value;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static void AppendErrorMessages(StringBuilder builder, JArray errors)
+        {
+            if (builder == null || errors == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < errors.Count; i++)
+            {
+                JObject error = errors[i] as JObject;
+                if (error == null)
+                {
+                    builder.AppendLine("  error: " + Convert.ToString(errors[i]));
+                    continue;
+                }
+
+                string code = FirstTokenString(error, "code", "field", "attribute_id");
+                string message = FirstTokenString(error, "message", "error", "text", "description");
+                builder.AppendLine("  error: " + (string.IsNullOrEmpty(code) ? string.Empty : code + " - ") + SafeText(message));
+            }
+        }
+
+        private static string SafeText(string value)
+        {
+            return string.IsNullOrEmpty(value) ? "(none)" : value;
         }
 
         private static void Validate1688Options(SourcingOptions options)
@@ -315,6 +590,131 @@ namespace LitchiOzonRecovery
                     target.Attributes[pair.Key] = pair.Value;
                 }
             }
+        }
+
+        private static void EnrichProductWithDeepSeek(SourceProduct product, SourcingOptions options, JArray categoryAttributes)
+        {
+            if (product == null)
+            {
+                return;
+            }
+
+            string deepSeekApiKey = Environment.GetEnvironmentVariable(DeepSeekApiKeyEnvVar);
+            if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+            {
+                if (string.IsNullOrEmpty(product.RussianTitle))
+                {
+                    product.RussianTitle = Truncate(CleanPublicText(product.Title), 120);
+                }
+
+                return;
+            }
+
+            try
+            {
+                JObject source = new JObject();
+                source["title_cn"] = product.Title ?? string.Empty;
+                source["price_cny"] = product.PriceCny;
+                source["source_url"] = product.SourceUrl ?? string.Empty;
+                source["keyword"] = product.Keyword ?? product.EnglishKeyword ?? string.Empty;
+                source["attributes_cn"] = JObject.FromObject(product.Attributes ?? new Dictionary<string, string>());
+                source["ozon_required_attributes"] = BuildDeepSeekAttributeHints(categoryAttributes);
+
+                JObject request = new JObject();
+                request["model"] = "deepseek-chat";
+                request["temperature"] = 0.2;
+                request["response_format"] = new JObject(new JProperty("type", "json_object"));
+                JArray messages = new JArray();
+                messages.Add(new JObject(
+                    new JProperty("role", "system"),
+                    new JProperty("content", "You generate Ozon marketplace listings. Return strict JSON only. Russian title and description are mandatory. Search keyword must be precise English. Fill Ozon required attributes when a text value can be inferred; do not invent safety certifications.")));
+                messages.Add(new JObject(
+                    new JProperty("role", "user"),
+                    new JProperty("content",
+                        "Create listing JSON for this 1688 product. Required schema: {\"search_keyword_en\":\"...\",\"title_ru\":\"...\",\"description_ru\":\"...\",\"ozon_attributes\":[{\"id\":123,\"value\":\"...\"}],\"dimensions\":{\"height_mm\":100,\"width_mm\":100,\"depth_mm\":100,\"weight_g\":500}}. Product data: " +
+                        source.ToString(Formatting.None))));
+                request["messages"] = messages;
+
+                JObject response = JObject.Parse(PostDeepSeekJson(request.ToString(Formatting.None), deepSeekApiKey));
+                string content = Convert.ToString(response.SelectToken("choices[0].message.content") ?? string.Empty);
+                JObject listing = JObject.Parse(ExtractJsonObject(content));
+                product.EnglishKeyword = CleanPublicText(Convert.ToString(listing["search_keyword_en"] ?? string.Empty));
+                product.RussianTitle = CleanPublicText(Convert.ToString(listing["title_ru"] ?? string.Empty));
+                product.RussianDescription = CleanPublicText(Convert.ToString(listing["description_ru"] ?? string.Empty));
+
+                JArray attrs = listing["ozon_attributes"] as JArray;
+                for (int i = 0; attrs != null && i < attrs.Count; i++)
+                {
+                    JObject attr = attrs[i] as JObject;
+                    if (attr == null)
+                    {
+                        continue;
+                    }
+
+                    long id = 0;
+                    long.TryParse(Convert.ToString(attr["id"] ?? string.Empty), out id);
+                    string value = CleanPublicText(Convert.ToString(attr["value"] ?? string.Empty));
+                    if (id > 0 && !string.IsNullOrEmpty(value) && !product.OzonAttributes.ContainsKey(id))
+                    {
+                        product.OzonAttributes[id] = value;
+                    }
+                }
+
+                JObject dimensions = listing["dimensions"] as JObject;
+                if (dimensions != null)
+                {
+                    AddDimensionAttribute(product, "height_mm", Convert.ToString(dimensions["height_mm"] ?? string.Empty));
+                    AddDimensionAttribute(product, "width_mm", Convert.ToString(dimensions["width_mm"] ?? string.Empty));
+                    AddDimensionAttribute(product, "depth_mm", Convert.ToString(dimensions["depth_mm"] ?? string.Empty));
+                    AddDimensionAttribute(product, "weight_g", Convert.ToString(dimensions["weight_g"] ?? string.Empty));
+                }
+            }
+            catch
+            {
+                if (string.IsNullOrEmpty(product.RussianTitle))
+                {
+                    product.RussianTitle = Truncate(CleanPublicText(product.Title), 120);
+                }
+            }
+        }
+
+        private static JArray BuildDeepSeekAttributeHints(JArray attributes)
+        {
+            JArray hints = new JArray();
+            for (int i = 0; attributes != null && i < attributes.Count && hints.Count < 30; i++)
+            {
+                JObject attr = attributes[i] as JObject;
+                if (attr == null)
+                {
+                    continue;
+                }
+
+                bool required = string.Equals(Convert.ToString(attr["is_required"] ?? string.Empty), "True", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(Convert.ToString(attr["required"] ?? string.Empty), "True", StringComparison.OrdinalIgnoreCase);
+                if (!required)
+                {
+                    continue;
+                }
+
+                JObject hint = new JObject();
+                hint["id"] = attr["id"];
+                hint["name"] = Convert.ToString(attr["name"] ?? attr["attribute_name"] ?? string.Empty);
+                hint["type"] = Convert.ToString(attr["type"] ?? string.Empty);
+                hint["dictionary_id"] = attr["dictionary_id"];
+                hints.Add(hint);
+            }
+
+            return hints;
+        }
+
+        private static void AddDimensionAttribute(SourceProduct product, string name, string value)
+        {
+            if (product == null || string.IsNullOrEmpty(value))
+            {
+                return;
+            }
+
+            product.Attributes[name] = value;
         }
 
         private static List<SourceProduct> Search1688(string keyword, SourcingOptions options, int limit)
@@ -422,21 +822,27 @@ namespace LitchiOzonRecovery
 
         private static JObject BuildOzonImportItem(SourceProduct product, SourcingOptions options)
         {
-            decimal rubPerCny = options.RubPerCny <= 0 ? 12.5m : options.RubPerCny;
             decimal multiplier = options.PriceMultiplier <= 0 ? 2.2m : options.PriceMultiplier;
-            decimal priceRub = Math.Ceiling(Math.Max(1m, product.PriceCny) * rubPerCny * multiplier);
+            string currency = string.IsNullOrEmpty(options.CurrencyCode) ? "CNY" : options.CurrencyCode;
+            decimal price = string.Equals(currency, "RUB", StringComparison.OrdinalIgnoreCase)
+                ? Math.Ceiling(Math.Max(1m, product.PriceCny) * (options.RubPerCny <= 0 ? 12.5m : options.RubPerCny) * multiplier)
+                : Math.Ceiling(Math.Max(1m, product.PriceCny) * multiplier);
             string offerId = "LZ1688-" + SafeOfferId(product.OfferId);
             string primaryImage = !string.IsNullOrEmpty(product.MainImage) ? product.MainImage : (product.Images.Count > 0 ? product.Images[0] : string.Empty);
+            string title = !string.IsNullOrEmpty(product.RussianTitle) ? product.RussianTitle : product.Title;
+            string description = !string.IsNullOrEmpty(product.RussianDescription)
+                ? product.RussianDescription
+                : CleanPublicText(product.Title) + "\nИсточник: " + product.SourceUrl;
 
             JObject item = new JObject();
             item["description_category_id"] = options.OzonCategoryId;
             item["type_id"] = options.OzonTypeId;
-            item["name"] = Truncate(CleanPublicText(product.Title), 500);
+            item["name"] = Truncate(CleanPublicText(title), 500);
             item["offer_id"] = offerId;
             item["barcode"] = string.Empty;
-            item["price"] = priceRub.ToString("0");
-            item["old_price"] = Math.Ceiling(priceRub * 1.25m).ToString("0");
-            item["currency_code"] = string.IsNullOrEmpty(options.CurrencyCode) ? "RUB" : options.CurrencyCode;
+            item["price"] = price.ToString("0");
+            item["old_price"] = Math.Ceiling(price * 1.25m).ToString("0");
+            item["currency_code"] = currency;
             item["vat"] = string.IsNullOrEmpty(options.Vat) ? "0" : options.Vat;
             item["height"] = 100;
             item["depth"] = 100;
@@ -456,13 +862,24 @@ namespace LitchiOzonRecovery
             }
             item["images"] = images;
 
-            item["attributes"] = new JArray();
-
-            if (!string.IsNullOrEmpty(product.SourceUrl))
+            JArray attributes = new JArray();
+            foreach (KeyValuePair<long, string> pair in product.OzonAttributes)
             {
-                item["description"] = Truncate(CleanPublicText(product.Title) + "\nSource: " + product.SourceUrl, 3000);
+                if (pair.Key <= 0 || string.IsNullOrEmpty(pair.Value))
+                {
+                    continue;
+                }
+
+                JObject attr = new JObject();
+                attr["id"] = pair.Key;
+                JArray values = new JArray();
+                values.Add(new JObject(new JProperty("value", Truncate(CleanPublicText(pair.Value), 900))));
+                attr["values"] = values;
+                attributes.Add(attr);
             }
 
+            item["attributes"] = attributes;
+            item["description"] = Truncate(CleanPublicText(description), 3000);
             return item;
         }
 
@@ -477,6 +894,26 @@ namespace LitchiOzonRecovery
             request.Timeout = 60000;
             request.Headers["Client-Id"] = clientId;
             request.Headers["Api-Key"] = apiKey;
+
+            byte[] body = Encoding.UTF8.GetBytes(json);
+            request.ContentLength = body.Length;
+            using (Stream requestStream = request.GetRequestStream())
+            {
+                requestStream.Write(body, 0, body.Length);
+            }
+
+            return ReadResponse(request);
+        }
+
+        private static string PostDeepSeekJson(string json, string apiKey)
+        {
+            EnsureModernTls();
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(DeepSeekChatEndpoint);
+            request.Method = "POST";
+            request.ContentType = "application/json";
+            request.Accept = "application/json";
+            request.Timeout = 45000;
+            request.Headers["Authorization"] = "Bearer " + apiKey;
 
             byte[] body = Encoding.UTF8.GetBytes(json);
             request.ContentLength = body.Length;
@@ -677,7 +1114,24 @@ namespace LitchiOzonRecovery
         {
             string text = value ?? string.Empty;
             text = text.Replace("Ozon hot", string.Empty).Replace("1688 hot", string.Empty);
-            return text.Trim();
+            return WebUtility.HtmlDecode(text).Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Trim();
+        }
+
+        private static string ExtractJsonObject(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return "{}";
+            }
+
+            int start = value.IndexOf('{');
+            int end = value.LastIndexOf('}');
+            if (start >= 0 && end > start)
+            {
+                return value.Substring(start, end - start + 1);
+            }
+
+            return value;
         }
 
         private static string Truncate(string value, int maxLength)

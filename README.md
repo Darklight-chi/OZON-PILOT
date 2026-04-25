@@ -2,7 +2,7 @@
 
 `#AttraX_Spring_Hackathon`
 
-This repository is a stripped recovery workspace for the OZON-PILOT source code.
+This repository is a public stripped recovery workspace for the OZON-PILOT source code.
 
 ## What is included
 
@@ -17,11 +17,13 @@ This repository is a stripped recovery workspace for the OZON-PILOT source code.
 - local browser profiles and caches
 - generated build output
 - bundled database snapshots and environment-specific data
+- production API keys, tokens, and private marketplace credentials
 
 ## Notes
 
 - This is a source-first handoff intended for review, collaboration, and continued reconstruction.
 - Some features that depend on omitted runtime assets will need local placeholders or restored dependencies before a full build can run.
+- AI-assisted enrichment only runs when `DEEPSEEK_API_KEY` is provided through the local environment.
 
 ## Important boundary
 
