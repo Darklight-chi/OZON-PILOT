@@ -1,15 +1,11 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace LitchiOzonRecovery
 {
     internal static class Program
     {
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool SetDllDirectory(string lpPathName);
-
         [STAThread]
         private static void Main()
         {
@@ -25,26 +21,12 @@ namespace LitchiOzonRecovery
             {
                 string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup-error.log");
                 File.WriteAllText(path, ex.ToString());
-                MessageBox.Show(ex.ToString(), "启动异常", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.ToString(), "Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         private static void ConfigureNativeDependencies(AppPaths paths)
         {
-            string sqliteDirectory = paths.NativeInteropDirectory;
-            if (!string.IsNullOrEmpty(sqliteDirectory))
-            {
-                string runtimeNativeDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, Path.GetFileName(sqliteDirectory));
-                AppPaths.EnsureDirectory(runtimeNativeDirectory);
-
-                string sourceDll = Path.Combine(sqliteDirectory, "SQLite.Interop.dll");
-                string targetDll = Path.Combine(runtimeNativeDirectory, "SQLite.Interop.dll");
-                SafeCopyIfMissing(sourceDll, targetDll);
-
-                SetDllDirectory(runtimeNativeDirectory);
-                PrependPath(runtimeNativeDirectory);
-            }
-
             string webViewLoaderDirectory = paths.WebViewLoaderDirectory;
             if (!string.IsNullOrEmpty(webViewLoaderDirectory))
             {

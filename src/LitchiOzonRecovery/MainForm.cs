@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
@@ -14,15 +15,119 @@ namespace LitchiOzonRecovery
 {
     public sealed class MainForm : Form
     {
+        private const string DefaultOzonClientId = "3401155";
+        private const string DefaultOzonApiKey = "639a0e1c-4299-4fbb-a59d-e972df07402e";
+        private static readonly Color ShellBack = Color.FromArgb(247, 245, 237);
+        private static readonly Color CardBack = Color.FromArgb(242, 255, 252, 246);
+        private static readonly Color SoftCardBack = Color.FromArgb(236, 255, 255, 250);
+        private static readonly Color LineWarm = Color.FromArgb(224, 214, 196);
+        private static readonly Color TextStrong = Color.FromArgb(22, 33, 48);
+        private static readonly Color TextMuted = Color.FromArgb(112, 127, 145);
+        private static readonly Color PilotGreen = Color.FromArgb(14, 139, 100);
+        private static readonly Color PilotGreenDark = Color.FromArgb(9, 113, 91);
+        private static readonly Color PilotGreenSoft = Color.FromArgb(225, 247, 240);
+
+        private sealed class FeeRuleDisplayRow
+        {
+            public FeeRule Rule { get; set; }
+            public int Id { get; set; }
+            public long CategoryId1 { get; set; }
+            public long CategoryId2 { get; set; }
+            public string Category1 { get; set; }
+            public string Category2 { get; set; }
+            public decimal FBS { get; set; }
+            public decimal FBS1500 { get; set; }
+            public decimal FBS5000 { get; set; }
+            public decimal FBP { get; set; }
+            public decimal FBP1500 { get; set; }
+            public decimal FBP5000 { get; set; }
+            public decimal FBO { get; set; }
+            public decimal FBO1500 { get; set; }
+            public decimal FBO5000 { get; set; }
+        }
+
+        private sealed class RoundedPanel : Panel
+        {
+            public int Radius { get; set; }
+            public Color BorderColor { get; set; }
+            public Color FillColor { get; set; }
+            public Color ShadowColor { get; set; }
+            public bool DrawShadow { get; set; }
+
+            public RoundedPanel()
+            {
+                Radius = 22;
+                BorderColor = Color.FromArgb(210, 224, 214, 198);
+                FillColor = SoftCardBack;
+                ShadowColor = Color.FromArgb(20, 87, 76, 55);
+                DrawShadow = true;
+                BackColor = Color.Transparent;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle body = ClientRectangle;
+                body.Width -= 1;
+                body.Height -= 1;
+
+                if (DrawShadow && body.Width > 12 && body.Height > 12)
+                {
+                    Rectangle shadow = body;
+                    shadow.Inflate(-2, -2);
+                    shadow.Offset(0, 5);
+                    using (GraphicsPath shadowPath = CreateRoundPath(shadow, Radius))
+                    using (SolidBrush shadowBrush = new SolidBrush(ShadowColor))
+                    {
+                        e.Graphics.FillPath(shadowBrush, shadowPath);
+                    }
+                }
+
+                using (GraphicsPath path = CreateRoundPath(body, Radius))
+                using (SolidBrush brush = new SolidBrush(FillColor))
+                using (Pen pen = new Pen(BorderColor))
+                {
+                    e.Graphics.FillPath(brush, path);
+                    e.Graphics.DrawPath(pen, path);
+                }
+
+                base.OnPaint(e);
+            }
+        }
+
+        private sealed class GradientPanel : Panel
+        {
+            public Color StartColor { get; set; }
+            public Color EndColor { get; set; }
+            public float Angle { get; set; }
+
+            public GradientPanel()
+            {
+                StartColor = Color.FromArgb(250, 248, 241);
+                EndColor = Color.FromArgb(239, 245, 238);
+                Angle = 90f;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                using (LinearGradientBrush brush = new LinearGradientBrush(ClientRectangle, StartColor, EndColor, Angle))
+                {
+                    e.Graphics.FillRectangle(brush, ClientRectangle);
+                }
+
+                base.OnPaint(e);
+            }
+        }
+
         private readonly AppPaths _paths;
-        private readonly DatabaseService _databaseService;
-        private readonly UpdaterService _updaterService;
         private readonly ProductAutomationService _automationService;
-        private readonly OzonPlusService _ozonPlusService;
         private readonly Random _random;
+        private CancellationTokenSource _currentProcessCancel;
+        private string _currentProcessName;
         private AssetSnapshot _snapshot;
         private SourcingResult _lastSourcingResult;
-        private OzonPlusEnvironmentStatus _ozonPlusStatus;
         private string _fullAutoReport;
 
         private TabControl _mainTabs;
@@ -30,16 +135,9 @@ namespace LitchiOzonRecovery
         private Label _cardCategoryValue;
         private Label _cardFeeValue;
         private Label _cardPluginValue;
-        private Label _cardDbValue;
+        private ComboBox _languageComboBox;
         private TextBox _autoLoopCountBox;
         private PropertyGrid _configGrid;
-        private Label _dbSummaryLabel;
-        private Label _dbBatchSummaryLabel;
-        private ComboBox _dbTableSelector;
-        private TextBox _dbBatchInputBox;
-        private DataGridView _skuGrid;
-        private DataGridView _shopGrid;
-        private DataGridView _catchGrid;
         private TreeView _categoryTree;
         private DataGridView _feeGrid;
         private TextBox _assetSearchBox;
@@ -59,34 +157,19 @@ namespace LitchiOzonRecovery
         private TextBox _autoPriceMultiplierBox;
         private TextBox _ozonClientIdBox;
         private TextBox _ozonApiKeyBox;
-        private TextBox _ozonWarehouseIdBox;
-        private TextBox _ozonWarehouseNameBox;
         private DataGridView _autoResultGrid;
         private TextBox _autoLogBox;
-        private Label _autoEnvLabel;
-        private TextBox _calcCategory1Box;
-        private TextBox _calcCategory2Box;
-        private TextBox _calcSourcePriceBox;
-        private TextBox _calcWeightBox;
-        private TextBox _calcDeliveryFeeBox;
-        private TextBox _calcOtherCostBox;
-        private TextBox _calcTargetProfitBox;
-        private TextBox _calcManualPriceBox;
-        private ComboBox _calcModeCombo;
-        private TextBox _calcResultBox;
         private StatusStrip _statusStrip;
         private ToolStripStatusLabel _statusLabel;
-        private string _databaseErrorMessage;
         private string _assetErrorMessage;
+        private string _uiLanguage = "zh";
 
         public MainForm()
         {
             _paths = AppPaths.Discover();
-            _databaseService = new DatabaseService(_paths.DatabaseFile);
-            _updaterService = new UpdaterService(_paths);
             _automationService = new ProductAutomationService();
-            _ozonPlusService = new OzonPlusService(_paths);
             _random = new Random();
+            LoadUiLanguagePreference();
 
             Text = "OZON-PILOT";
             Width = 1460;
@@ -94,11 +177,28 @@ namespace LitchiOzonRecovery
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1280, 820);
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point, 134);
-            BackColor = Color.FromArgb(245, 247, 250);
+            BackColor = ShellBack;
+            ApplyWindowIcon();
 
             InitializeControls();
             LoadAll();
+            ApplyOzonSellerDefaults();
             Shown += delegate { InitializeBrowser(null, EventArgs.Empty); };
+        }
+
+        private void ApplyWindowIcon()
+        {
+            try
+            {
+                Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (icon != null)
+                {
+                    Icon = icon;
+                }
+            }
+            catch
+            {
+            }
         }
 
         private void InitializeControls()
@@ -107,20 +207,25 @@ namespace LitchiOzonRecovery
 
             _mainTabs = new TabControl();
             _mainTabs.Dock = DockStyle.Fill;
-            _mainTabs.ItemSize = new Size(120, 34);
+            _mainTabs.ItemSize = new Size(156, 56);
             _mainTabs.SizeMode = TabSizeMode.Fixed;
+            _mainTabs.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            _mainTabs.Appearance = TabAppearance.FlatButtons;
+            _mainTabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            _mainTabs.DrawItem += DrawMainTab;
             _mainTabs.TabPages.Add(BuildOverviewTab());
             _mainTabs.TabPages.Add(BuildConfigTab());
-            _mainTabs.TabPages.Add(BuildDatabaseTab());
             _mainTabs.TabPages.Add(BuildAssetsTab());
-            _mainTabs.TabPages.Add(BuildCalculatorTab());
+            _mainTabs.TabPages.Add(BuildLanguageTab());
             _mainTabs.TabPages.Add(BuildAutomationTab());
             _mainTabs.TabPages.Add(BuildBrowserTab());
 
             _statusStrip = new StatusStrip();
             _statusStrip.SizingGrip = false;
+            _statusStrip.BackColor = Color.FromArgb(39, 50, 43);
             _statusLabel = new ToolStripStatusLabel();
-            _statusLabel.Text = "准备就绪";
+            _statusLabel.Text = "Ready";
+            _statusLabel.ForeColor = Color.White;
             _statusStrip.Items.Add(_statusLabel);
 
             Controls.Add(_mainTabs);
@@ -128,44 +233,155 @@ namespace LitchiOzonRecovery
             Controls.Add(_statusStrip);
         }
 
+        private void DrawMainTab(object sender, DrawItemEventArgs e)
+        {
+            TabControl tabs = sender as TabControl;
+            if (tabs == null || e.Index < 0 || e.Index >= tabs.TabPages.Count)
+            {
+                return;
+            }
+
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle bounds = tabs.GetTabRect(e.Index);
+            Rectangle clear = bounds;
+            clear.Inflate(2, 8);
+            using (SolidBrush clearBrush = new SolidBrush(ShellBack))
+            {
+                e.Graphics.FillRectangle(clearBrush, clear);
+            }
+
+            bounds.Inflate(-14, -10);
+            bool selected = e.Index == tabs.SelectedIndex;
+
+            Color fill = selected ? Color.FromArgb(232, 255, 248, 241) : Color.FromArgb(120, 255, 255, 252);
+            Color border = selected ? Color.FromArgb(182, 137, 207, 189) : Color.Transparent;
+            Color text = selected ? TextStrong : TextMuted;
+
+            using (GraphicsPath path = CreateRoundPath(bounds, 22))
+            using (SolidBrush brush = new SolidBrush(fill))
+            using (Pen pen = new Pen(border))
+            {
+                e.Graphics.FillPath(brush, path);
+                if (selected)
+                {
+                    e.Graphics.DrawPath(pen, path);
+                }
+            }
+
+            string icon = string.Empty;
+            if (e.Index == 0) icon = "⚙  ";
+            else if (e.Index == 1) icon = "🛠  ";
+            else if (e.Index == 2) icon = "📦  ";
+            else if (e.Index == 3) icon = "🌐  ";
+            else if (e.Index == 4) icon = "🚚  ";
+            else if (e.Index == 5) icon = "🔎  ";
+
+            TextRenderer.DrawText(
+                e.Graphics,
+                icon + tabs.TabPages[e.Index].Text,
+                tabs.Font,
+                bounds,
+                text,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
         private Panel BuildHeaderPanel()
         {
-            Panel panel = new Panel();
+            GradientPanel panel = new GradientPanel();
             panel.Dock = DockStyle.Top;
-            panel.Height = 84;
-            panel.BackColor = Color.White;
-            panel.Padding = new Padding(20, 14, 20, 12);
+            panel.Height = 76;
+            panel.StartColor = Color.FromArgb(252, 250, 244);
+            panel.EndColor = Color.FromArgb(244, 247, 239);
+            panel.Angle = 0f;
+            panel.Padding = new Padding(28, 10, 20, 10);
+
+            RoundedPanel badge = new RoundedPanel();
+            badge.Left = 30;
+            badge.Top = 10;
+            badge.Width = 54;
+            badge.Height = 52;
+            badge.Radius = 18;
+            badge.FillColor = Color.FromArgb(255, 16, 128, 111);
+            badge.BorderColor = Color.FromArgb(255, 16, 128, 111);
+            badge.ShadowColor = Color.FromArgb(24, 16, 128, 111);
+
+            Label badgeText = new Label();
+            badgeText.Text = "OP";
+            badgeText.ForeColor = Color.White;
+            badgeText.BackColor = Color.Transparent;
+            badgeText.Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            badgeText.AutoSize = false;
+            badgeText.Dock = DockStyle.Fill;
+            badgeText.TextAlign = ContentAlignment.MiddleCenter;
+            badge.Controls.Add(badgeText);
+
+            Panel liveDot = new Panel();
+            liveDot.Left = 104;
+            liveDot.Top = 31;
+            liveDot.Width = 12;
+            liveDot.Height = 12;
+            liveDot.BackColor = Color.FromArgb(94, 187, 144);
+            SetRoundedRegion(liveDot, 6);
 
             Label title = new Label();
-            title.Text = "OZON-PILOT";
-            title.Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            title.Text = "Ozon Pilot";
+            title.Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            title.ForeColor = TextStrong;
+            title.BackColor = Color.Transparent;
             title.AutoSize = true;
-            title.Location = new Point(18, 10);
+            title.Location = new Point(136, 18);
 
             Label subtitle = new Label();
-            subtitle.Text = "已接回配置、类目树、运费规则、插件与更新器。数据库支持批量粘贴导入，并会明确区分空库与加载失败。";
-            subtitle.ForeColor = Color.FromArgb(96, 98, 102);
+            subtitle.Text = "管理控制台";
+            subtitle.ForeColor = TextMuted;
+            subtitle.BackColor = Color.Transparent;
             subtitle.AutoSize = true;
-            subtitle.Location = new Point(20, 48);
+            subtitle.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Regular, GraphicsUnit.Point, 134);
+            subtitle.Location = new Point(264, 21);
 
+            Label account = new Label();
+            account.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "      488059663@qq.com";
+            account.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            account.AutoSize = true;
+            account.ForeColor = Color.FromArgb(119, 136, 154);
+            account.BackColor = Color.Transparent;
+            account.Font = new Font("Consolas", 9.5F, FontStyle.Regular, GraphicsUnit.Point, 0);
+            account.Location = new Point(840, 24);
+
+            Label logout = new Label();
+            logout.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            logout.Text = "退出";
+            logout.AutoSize = false;
+            logout.Width = 74;
+            logout.Height = 34;
+            logout.Left = 1278;
+            logout.Top = 16;
+            logout.TextAlign = ContentAlignment.MiddleCenter;
+            logout.ForeColor = Color.FromArgb(100, 114, 130);
+            logout.BackColor = Color.FromArgb(253, 251, 246);
+            logout.BorderStyle = BorderStyle.FixedSingle;
+            SetRoundedRegion(logout, 12);
+
+            panel.Controls.Add(logout);
+            panel.Controls.Add(account);
             panel.Controls.Add(title);
             panel.Controls.Add(subtitle);
+            panel.Controls.Add(liveDot);
+            panel.Controls.Add(badge);
             return panel;
         }
 
         private TabPage BuildOverviewTab()
         {
-            TabPage tab = CreateTabPage("总览");
+            TabPage tab = CreateTabPage(T("overview"));
 
             FlowLayoutPanel actions = CreateActionBar();
-            actions.Controls.Add(CreateButton("重新载入全部", delegate { LoadAll(); }, true));
-            actions.Controls.Add(CreateButton("打开基线资源", delegate { _paths.OpenPath(_paths.BaselineRoot); }, false));
-            actions.Controls.Add(CreateButton("打开 1688 插件", delegate { _paths.OpenPath(_paths.Plugin1688Folder); }, false));
-            actions.Controls.Add(CreateButton("打开数据库文件", delegate { _paths.OpenPath(_paths.DatabaseFile); }, false));
-            actions.Controls.Add(CreateButton("运行更新器", LaunchUpdater, false));
+            actions.Controls.Add(CreateButton(T("reload"), delegate { LoadAll(); }, true));
+
+            actions.Controls.Add(CreateButton(T("brake"), EmergencyStopCurrentProcess, false));
 
             Label loopLabel = new Label();
-            loopLabel.Text = "全自动循环次数";
+            loopLabel.Text = T("loopCount");
             loopLabel.AutoSize = true;
             loopLabel.Margin = new Padding(20, 9, 4, 0);
             actions.Controls.Add(loopLabel);
@@ -173,23 +389,21 @@ namespace LitchiOzonRecovery
             _autoLoopCountBox.Width = 54;
             _autoLoopCountBox.Text = "1";
             actions.Controls.Add(_autoLoopCountBox);
-            actions.Controls.Add(CreateButton("全链路自动循环", RunFullAutoLoop, true));
+            actions.Controls.Add(CreateButton(T("fullAuto"), RunFullAutoLoop, true));
 
             TableLayoutPanel cards = new TableLayoutPanel();
             cards.Dock = DockStyle.Top;
             cards.Height = 124;
-            cards.ColumnCount = 4;
+            cards.ColumnCount = 3;
             cards.RowCount = 1;
             cards.Padding = new Padding(12, 0, 12, 0);
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34F));
 
-            cards.Controls.Add(CreateStatCard("类目节点", "0", "从 category.txt 读取到的类目树节点总数", Color.FromArgb(64, 158, 255), out _cardCategoryValue), 0, 0);
-            cards.Controls.Add(CreateStatCard("运费规则", "0", "从 fee.txt 读取到的运费规则总数", Color.FromArgb(103, 194, 58), out _cardFeeValue), 1, 0);
-            cards.Controls.Add(CreateStatCard("插件文件", "0", "1688 插件目录中的文件总数", Color.FromArgb(230, 162, 60), out _cardPluginValue), 2, 0);
-            cards.Controls.Add(CreateStatCard("数据库记录", "0", "三张本地表的记录合计", Color.FromArgb(245, 108, 108), out _cardDbValue), 3, 0);
+            cards.Controls.Add(CreateStatCard(T("categoryNodes"), "0", T("categoryNodesDesc"), PilotGreen, out _cardCategoryValue), 0, 0);
+            cards.Controls.Add(CreateStatCard(T("feeRules"), "0", T("feeRulesDesc"), Color.FromArgb(42, 126, 190), out _cardFeeValue), 1, 0);
+            cards.Controls.Add(CreateStatCard(T("pluginFiles"), "0", T("pluginFilesDesc"), Color.FromArgb(205, 127, 30), out _cardPluginValue), 2, 0);
 
             SplitContainer split = new SplitContainer();
             split.Dock = DockStyle.Fill;
@@ -201,7 +415,7 @@ namespace LitchiOzonRecovery
             _overviewBox.Multiline = true;
             _overviewBox.ReadOnly = true;
             _overviewBox.ScrollBars = ScrollBars.Vertical;
-            _overviewBox.BackColor = Color.White;
+            _overviewBox.BackColor = Color.FromArgb(255, 253, 248);
             _overviewBox.BorderStyle = BorderStyle.FixedSingle;
             _overviewBox.Font = new Font("Microsoft YaHei UI", 9F);
 
@@ -209,26 +423,13 @@ namespace LitchiOzonRecovery
             quickGuide.Multiline = true;
             quickGuide.ReadOnly = true;
             quickGuide.ScrollBars = ScrollBars.Vertical;
-            quickGuide.BackColor = Color.White;
+            quickGuide.BackColor = Color.FromArgb(255, 253, 248);
             quickGuide.BorderStyle = BorderStyle.FixedSingle;
             quickGuide.Font = new Font("Microsoft YaHei UI", 9F);
-            quickGuide.Text =
-                "当前这版你能做的事情：" + Environment.NewLine +
-                "1. 在“配置中心”核对原有筛选参数和默认运费。" + Environment.NewLine +
-                "2. 在“数据库管理”批量导入 SKU / 店铺 ID，并做去重、清空、导出。" + Environment.NewLine +
-                "3. 在“类目与规则”里查看原包带回来的类目树和 519 条运费规则。" + Environment.NewLine +
-                "4. 在“利润测算”里按类目、重量、成本快速估算售价和利润率。" + Environment.NewLine +
-                "5. 在“插件浏览器”里继续联调 1688 插件环境。" + Environment.NewLine +
-                Environment.NewLine +
-                "当前还不能诚实地说已经恢复完成的功能：" + Environment.NewLine +
-                "1. OZON 自动选品主流程。" + Environment.NewLine +
-                "2. OZON 自动上架 / 自动刊登。" + Environment.NewLine +
-                "3. 原程序里的完整业务编排和任务自动化。" + Environment.NewLine +
-                Environment.NewLine +
-                "原因是这几个核心能力不在现有 1688 插件目录里，更多逻辑大概率还封在原始主程序二进制中，仍需要继续反推和重建。";
+            quickGuide.Text = T("quickGuide");
 
-            split.Panel1.Controls.Add(WrapWithGroup("恢复资产明细", _overviewBox));
-            split.Panel2.Controls.Add(WrapWithGroup("上手说明", quickGuide));
+            split.Panel1.Controls.Add(WrapWithGroup(T("overviewDetails"), _overviewBox));
+            split.Panel2.Controls.Add(WrapWithGroup(T("quickStart"), quickGuide));
 
             tab.Controls.Add(split);
             tab.Controls.Add(cards);
@@ -238,149 +439,39 @@ namespace LitchiOzonRecovery
 
         private TabPage BuildConfigTab()
         {
-            TabPage tab = CreateTabPage("配置中心");
+            TabPage tab = CreateTabPage(T("config"));
 
             FlowLayoutPanel actions = CreateActionBar();
-            actions.Controls.Add(CreateButton("重新读取配置", delegate { LoadConfig(); UpdateOverview(); }, true));
-            actions.Controls.Add(CreateButton("保存当前配置", SaveConfig, false));
+            actions.Controls.Add(CreateButton(T("reloadConfig"), delegate { LoadConfig(); UpdateOverview(); }, true));
+            actions.Controls.Add(CreateButton(T("saveConfig"), SaveConfig, false));
 
             _configGrid = new PropertyGrid();
             _configGrid.Dock = DockStyle.Fill;
             _configGrid.HelpVisible = true;
             _configGrid.ToolbarVisible = false;
             _configGrid.PropertySort = PropertySort.Categorized;
-            _configGrid.BackColor = Color.White;
-            _configGrid.ViewBackColor = Color.White;
+            _configGrid.BackColor = Color.FromArgb(255, 253, 248);
+            _configGrid.ViewBackColor = Color.FromArgb(255, 253, 248);
 
             Panel body = new Panel();
             body.Dock = DockStyle.Fill;
             body.Padding = new Padding(12);
-            body.Controls.Add(WrapWithGroup("筛选配置", _configGrid));
+            body.Controls.Add(WrapWithGroup(T("filterConfig"), _configGrid));
 
             tab.Controls.Add(body);
             tab.Controls.Add(actions);
             return tab;
         }
 
-        private TabPage BuildDatabaseTab()
-        {
-            TabPage tab = CreateTabPage("数据库管理");
-
-            FlowLayoutPanel actions = CreateActionBar();
-            actions.Controls.Add(CreateButton("刷新数据库", delegate { LoadDatabase(); }, true));
-            actions.Controls.Add(CreateButton("追加导入文件", AppendIdsIntoTable, false));
-            actions.Controls.Add(CreateButton("覆盖导入文件", ReplaceIdsIntoTable, false));
-            actions.Controls.Add(CreateButton("导出当前表", ExportIdsFromTable, false));
-            actions.Controls.Add(CreateButton("批量粘贴入库", ImportPastedIdsIntoTable, false));
-            actions.Controls.Add(CreateButton("清空当前表", ClearCurrentTable, false));
-
-            Label selectorLabel = new Label();
-            selectorLabel.Text = "当前操作表：";
-            selectorLabel.AutoSize = true;
-            selectorLabel.Margin = new Padding(20, 9, 4, 0);
-            actions.Controls.Add(selectorLabel);
-
-            _dbTableSelector = new ComboBox();
-            _dbTableSelector.DropDownStyle = ComboBoxStyle.DropDownList;
-            _dbTableSelector.Width = 160;
-            _dbTableSelector.Items.AddRange(new object[] { "SkuTable", "ShopTable", "tb_catch_shop" });
-            _dbTableSelector.SelectedIndex = 0;
-            actions.Controls.Add(_dbTableSelector);
-
-            Panel summary = new Panel();
-            summary.Dock = DockStyle.Top;
-            summary.Height = 74;
-            summary.Padding = new Padding(16, 10, 16, 0);
-            summary.BackColor = Color.White;
-
-            _dbSummaryLabel = new Label();
-            _dbSummaryLabel.Dock = DockStyle.Top;
-            _dbSummaryLabel.Height = 24;
-            _dbSummaryLabel.ForeColor = Color.FromArgb(96, 98, 102);
-
-            _dbBatchSummaryLabel = new Label();
-            _dbBatchSummaryLabel.Dock = DockStyle.Top;
-            _dbBatchSummaryLabel.Height = 24;
-            _dbBatchSummaryLabel.ForeColor = Color.FromArgb(144, 147, 153);
-
-            summary.Controls.Add(_dbBatchSummaryLabel);
-            summary.Controls.Add(_dbSummaryLabel);
-
-            SplitContainer layout = new SplitContainer();
-            layout.Dock = DockStyle.Fill;
-            layout.SplitterDistance = 940;
-            layout.Panel1.Padding = new Padding(12, 10, 6, 12);
-            layout.Panel2.Padding = new Padding(6, 10, 12, 12);
-
-            TableLayoutPanel left = new TableLayoutPanel();
-            left.Dock = DockStyle.Fill;
-            left.ColumnCount = 1;
-            left.RowCount = 3;
-            left.RowStyles.Add(new RowStyle(SizeType.Percent, 34F));
-            left.RowStyles.Add(new RowStyle(SizeType.Percent, 33F));
-            left.RowStyles.Add(new RowStyle(SizeType.Percent, 33F));
-
-            _skuGrid = CreateGrid();
-            _shopGrid = CreateGrid();
-            _catchGrid = CreateGrid();
-
-            left.Controls.Add(WrapWithGroup("SKU 表预览", _skuGrid), 0, 0);
-            left.Controls.Add(WrapWithGroup("店铺表预览", _shopGrid), 0, 1);
-            left.Controls.Add(WrapWithGroup("抓取店铺表预览", _catchGrid), 0, 2);
-
-            Panel editor = new Panel();
-            editor.Dock = DockStyle.Fill;
-            editor.BackColor = Color.White;
-            editor.Padding = new Padding(12);
-
-            Label hint = new Label();
-            hint.Text = "批量导入区支持一行一个 ID，也支持逗号、空格、制表符混排。适合从表格、网页和聊天记录里直接粘贴。";
-            hint.Dock = DockStyle.Top;
-            hint.Height = 38;
-            hint.ForeColor = Color.FromArgb(96, 98, 102);
-
-            _dbBatchInputBox = new TextBox();
-            _dbBatchInputBox.Dock = DockStyle.Fill;
-            _dbBatchInputBox.Multiline = true;
-            _dbBatchInputBox.ScrollBars = ScrollBars.Vertical;
-            _dbBatchInputBox.BorderStyle = BorderStyle.FixedSingle;
-            _dbBatchInputBox.Font = new Font("Consolas", 10F, FontStyle.Regular, GraphicsUnit.Point, 0);
-
-            FlowLayoutPanel editorActions = new FlowLayoutPanel();
-            editorActions.Dock = DockStyle.Bottom;
-            editorActions.Height = 80;
-            editorActions.WrapContents = true;
-            editorActions.Padding = new Padding(0, 10, 0, 0);
-            editorActions.Controls.Add(CreateButton("从剪贴板粘贴", PasteFromClipboard, true));
-            editorActions.Controls.Add(CreateButton("统计待导入数量", AnalyzePastedIds, false));
-            editorActions.Controls.Add(CreateButton("去重整理", NormalizePastedIds, false));
-            editorActions.Controls.Add(CreateButton("清空粘贴区", ClearPastedIds, false));
-            editorActions.Controls.Add(CreateButton("追加入当前表", ImportPastedIdsIntoTable, false));
-
-            editor.Controls.Add(_dbBatchInputBox);
-            editor.Controls.Add(editorActions);
-            editor.Controls.Add(hint);
-
-            layout.Panel1.Controls.Add(left);
-            layout.Panel2.Controls.Add(WrapWithGroup("批量导入工作区", editor));
-
-            tab.Controls.Add(layout);
-            tab.Controls.Add(summary);
-            tab.Controls.Add(actions);
-            return tab;
-        }
-
         private TabPage BuildAssetsTab()
         {
-            TabPage tab = CreateTabPage("类目与规则");
+            TabPage tab = CreateTabPage(T("assets"));
 
             FlowLayoutPanel actions = CreateActionBar();
-            actions.Controls.Add(CreateButton("重新读取资源", delegate { LoadAssets(); }, true));
-            actions.Controls.Add(CreateButton("导出运费规则 Excel", ExportFeeRules, false));
-            actions.Controls.Add(CreateButton("把选中规则带入测算", UseSelectedFeeRule, false));
+            actions.Controls.Add(CreateButton(T("reloadAssets"), delegate { LoadAssets(); }, true));
 
             Label searchLabel = new Label();
-            searchLabel.Text = "搜索类目/规则：";
+            searchLabel.Text = T("searchAssets");
             searchLabel.AutoSize = true;
             searchLabel.Margin = new Padding(20, 9, 4, 0);
             actions.Controls.Add(searchLabel);
@@ -398,7 +489,7 @@ namespace LitchiOzonRecovery
 
             _categoryTree = new TreeView();
             _categoryTree.Dock = DockStyle.Fill;
-            _categoryTree.BackColor = Color.White;
+            _categoryTree.BackColor = Color.FromArgb(255, 253, 248);
             _categoryTree.NodeMouseDoubleClick += UseSelectedCategoryForAutomation;
 
             _feeGrid = CreateGrid();
@@ -406,127 +497,85 @@ namespace LitchiOzonRecovery
             _feeGrid.MultiSelect = false;
             _feeGrid.CellDoubleClick += UseSelectedFeeRule;
 
-            split.Panel1.Controls.Add(WrapWithGroup("类目树", _categoryTree));
-            split.Panel2.Controls.Add(WrapWithGroup("运费规则表", _feeGrid));
+            split.Panel1.Controls.Add(WrapWithGroup(T("categoryTree"), _categoryTree));
+            split.Panel2.Controls.Add(WrapWithGroup(T("feeRuleTable"), _feeGrid));
 
             tab.Controls.Add(split);
             tab.Controls.Add(actions);
             return tab;
         }
 
-        private TabPage BuildCalculatorTab()
+        private TabPage BuildLanguageTab()
         {
-            TabPage tab = CreateTabPage("利润测算");
+            TabPage tab = CreateTabPage(T("language"));
 
-            SplitContainer split = new SplitContainer();
-            split.Dock = DockStyle.Fill;
-            split.SplitterDistance = 470;
-            split.Panel1.Padding = new Padding(12);
-            split.Panel2.Padding = new Padding(0, 12, 12, 12);
+            Panel body = new Panel();
+            body.Dock = DockStyle.Fill;
+            body.Padding = new Padding(18);
 
-            Panel editor = new Panel();
-            editor.Dock = DockStyle.Fill;
-            editor.BackColor = Color.White;
-            editor.Padding = new Padding(16);
+            RoundedPanel card = new RoundedPanel();
+            card.Dock = DockStyle.Top;
+            card.Height = 250;
+            card.Padding = new Padding(26, 24, 26, 24);
+            card.FillColor = Color.FromArgb(250, 252, 255);
+            card.BorderColor = Color.FromArgb(215, 226, 242);
 
-            int rowTop = 18;
-            int labelLeft = 16;
-            int inputLeft = 150;
-            int labelWidth = 120;
-            int inputWidth = 250;
+            Label title = new Label();
+            title.Text = T("languageTitle");
+            title.Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            title.ForeColor = Color.FromArgb(28, 45, 73);
+            title.AutoSize = true;
+            title.Location = new Point(24, 18);
 
-            editor.Controls.Add(CreateFormLabel("一级类目 ID", labelLeft, rowTop, labelWidth));
-            _calcCategory1Box = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcCategory1Box);
-            rowTop += 38;
+            Label desc = new Label();
+            desc.Text = T("languageDesc");
+            desc.ForeColor = Color.FromArgb(93, 105, 126);
+            desc.AutoSize = false;
+            desc.Width = 780;
+            desc.Height = 48;
+            desc.Location = new Point(24, 56);
 
-            editor.Controls.Add(CreateFormLabel("二级类目 ID", labelLeft, rowTop, labelWidth));
-            _calcCategory2Box = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcCategory2Box);
-            rowTop += 38;
+            Label comboLabel = new Label();
+            comboLabel.Text = T("languageCurrent");
+            comboLabel.ForeColor = Color.FromArgb(60, 72, 97);
+            comboLabel.AutoSize = true;
+            comboLabel.Location = new Point(24, 118);
 
-            editor.Controls.Add(CreateFormLabel("采购成本", labelLeft, rowTop, labelWidth));
-            _calcSourcePriceBox = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcSourcePriceBox);
-            rowTop += 38;
+            _languageComboBox = new ComboBox();
+            _languageComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            _languageComboBox.Width = 260;
+            _languageComboBox.Location = new Point(24, 144);
+            _languageComboBox.Items.AddRange(new object[] { "简体中文", "English", "Русский" });
+            _languageComboBox.SelectedIndex = LanguageIndexFromCode(_uiLanguage);
 
-            editor.Controls.Add(CreateFormLabel("重量(g)", labelLeft, rowTop, labelWidth));
-            _calcWeightBox = CreateTextBox(inputLeft, rowTop, inputWidth, "500");
-            editor.Controls.Add(_calcWeightBox);
-            rowTop += 38;
+            Button apply = CreateButton(T("applyLanguage"), ApplyLanguageSelection, true);
+            apply.Location = new Point(304, 140);
 
-            editor.Controls.Add(CreateFormLabel("运费", labelLeft, rowTop, labelWidth));
-            _calcDeliveryFeeBox = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcDeliveryFeeBox);
-            rowTop += 38;
+            Label note = new Label();
+            note.Text = T("languageNote");
+            note.ForeColor = Color.FromArgb(123, 132, 150);
+            note.AutoSize = false;
+            note.Width = 900;
+            note.Height = 52;
+            note.Location = new Point(24, 188);
 
-            editor.Controls.Add(CreateFormLabel("其他成本", labelLeft, rowTop, labelWidth));
-            _calcOtherCostBox = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcOtherCostBox);
-            rowTop += 38;
+            card.Controls.Add(title);
+            card.Controls.Add(desc);
+            card.Controls.Add(comboLabel);
+            card.Controls.Add(_languageComboBox);
+            card.Controls.Add(apply);
+            card.Controls.Add(note);
 
-            editor.Controls.Add(CreateFormLabel("目标利润率(%)", labelLeft, rowTop, labelWidth));
-            _calcTargetProfitBox = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcTargetProfitBox);
-            rowTop += 38;
-
-            editor.Controls.Add(CreateFormLabel("手动售价", labelLeft, rowTop, labelWidth));
-            _calcManualPriceBox = CreateTextBox(inputLeft, rowTop, inputWidth, "0");
-            editor.Controls.Add(_calcManualPriceBox);
-            rowTop += 38;
-
-            editor.Controls.Add(CreateFormLabel("履约模式", labelLeft, rowTop, labelWidth));
-            _calcModeCombo = new ComboBox();
-            _calcModeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            _calcModeCombo.Left = inputLeft;
-            _calcModeCombo.Top = rowTop;
-            _calcModeCombo.Width = inputWidth;
-            _calcModeCombo.Items.AddRange(new object[] { "FBS", "FBP", "FBO" });
-            _calcModeCombo.SelectedIndex = 0;
-            editor.Controls.Add(_calcModeCombo);
-            rowTop += 56;
-
-            Button applyConfigButton = CreateButton("套用配置默认值", ApplyConfigDefaultsToCalculator, true);
-            applyConfigButton.Left = inputLeft;
-            applyConfigButton.Top = rowTop;
-            editor.Controls.Add(applyConfigButton);
-
-            Button calculateButton = CreateButton("开始测算", CalculateProfit, false);
-            calculateButton.Left = inputLeft + 150;
-            calculateButton.Top = rowTop;
-            editor.Controls.Add(calculateButton);
-
-            Label hint = new Label();
-            hint.Text = "提示：在“类目与规则”里双击一条运费规则，会自动把类目 ID 带入这里。";
-            hint.ForeColor = Color.FromArgb(144, 147, 153);
-            hint.AutoSize = true;
-            hint.Left = 18;
-            hint.Top = rowTop + 44;
-            editor.Controls.Add(hint);
-
-            _calcResultBox = new TextBox();
-            _calcResultBox.Multiline = true;
-            _calcResultBox.ReadOnly = true;
-            _calcResultBox.ScrollBars = ScrollBars.Vertical;
-            _calcResultBox.BackColor = Color.White;
-            _calcResultBox.BorderStyle = BorderStyle.FixedSingle;
-
-            split.Panel1.Controls.Add(WrapWithGroup("测算输入", editor));
-            split.Panel2.Controls.Add(WrapWithGroup("测算结果", _calcResultBox));
-
-            tab.Controls.Add(split);
+            body.Controls.Add(card);
+            tab.Controls.Add(body);
             return tab;
         }
-
         private TabPage BuildAutomationTab()
         {
             TabPage tab = CreateTabPage("Auto Sourcing");
 
             FlowLayoutPanel actions = CreateActionBar();
             actions.Controls.Add(CreateButton("Run 1688 selection", RunAutoSourcing, true));
-            actions.Controls.Add(CreateButton("Upload selected to Ozon", UploadSelectedToOzon, false));
-            actions.Controls.Add(CreateButton("Check Ozon task", CheckOzonTask, false));
-            actions.Controls.Add(CreateButton("Export candidates", ExportAutoCandidates, false));
 
             SplitContainer main = new SplitContainer();
             main.Dock = DockStyle.Fill;
@@ -536,7 +585,7 @@ namespace LitchiOzonRecovery
 
             Panel editor = new Panel();
             editor.Dock = DockStyle.Fill;
-            editor.BackColor = Color.White;
+            editor.BackColor = Color.FromArgb(255, 253, 248);
             editor.Padding = new Padding(16);
 
             int top = 18;
@@ -546,7 +595,7 @@ namespace LitchiOzonRecovery
             int inputWidth = 230;
 
             editor.Controls.Add(CreateFormLabel("Keywords", labelLeft, top, labelWidth));
-            _autoKeywordsBox = CreateTextBox(inputLeft, top, inputWidth, "car storage organizer\r\npet slow feeder\r\nkitchen spice rack");
+            _autoKeywordsBox = CreateTextBox(inputLeft, top, inputWidth, "家居收纳\r\n宠物慢食碗\r\n厨房置物架");
             _autoKeywordsBox.Multiline = true;
             _autoKeywordsBox.Height = 88;
             editor.Controls.Add(_autoKeywordsBox);
@@ -564,7 +613,7 @@ namespace LitchiOzonRecovery
             browserModeValue.Left = inputLeft;
             browserModeValue.Top = top + 6;
             browserModeValue.Width = inputWidth;
-            browserModeValue.ForeColor = Color.FromArgb(64, 158, 255);
+            browserModeValue.ForeColor = PilotGreen;
             editor.Controls.Add(browserModeValue);
 
             _autoProviderBox = new ComboBox();
@@ -619,23 +668,23 @@ namespace LitchiOzonRecovery
             editor.Controls.Add(_autoTypeIdBox);
             top += 34;
 
-            editor.Controls.Add(CreateFormLabel("Price x", labelLeft, top, labelWidth));
+            editor.Controls.Add(CreateFormLabel("Min price x", labelLeft, top, labelWidth));
             _autoPriceMultiplierBox = CreateTextBox(inputLeft, top, inputWidth, "2.2");
             editor.Controls.Add(_autoPriceMultiplierBox);
             top += 34;
 
             editor.Controls.Add(CreateFormLabel("Ozon Client-Id", labelLeft, top, labelWidth));
-            _ozonClientIdBox = CreateTextBox(inputLeft, top, inputWidth, string.Empty);
+            _ozonClientIdBox = CreateTextBox(inputLeft, top, inputWidth, DefaultOzonClientId);
             editor.Controls.Add(_ozonClientIdBox);
             top += 34;
 
             editor.Controls.Add(CreateFormLabel("Ozon Api-Key", labelLeft, top, labelWidth));
-            _ozonApiKeyBox = CreateTextBox(inputLeft, top, inputWidth, string.Empty);
+            _ozonApiKeyBox = CreateTextBox(inputLeft, top, inputWidth, DefaultOzonApiKey);
             editor.Controls.Add(_ozonApiKeyBox);
             top += 42;
 
             Label hint = new Label();
-            hint.Text = "先在插件浏览器登录 1688，再点 Run。程序会用同一个浏览器会话搜索并抓详情。Ozon 字段只在上传时需要。";
+            hint.Text = "先在插件浏览器登录 1688，再点 Run。程序会复用同一个浏览器会话搜索并抓详情。Ozon 字段只在上传时需要。";
             hint.Left = labelLeft;
             hint.Top = top;
             hint.Width = 360;
@@ -656,7 +705,7 @@ namespace LitchiOzonRecovery
             _autoLogBox.Multiline = true;
             _autoLogBox.ReadOnly = true;
             _autoLogBox.ScrollBars = ScrollBars.Vertical;
-            _autoLogBox.BackColor = Color.White;
+            _autoLogBox.BackColor = Color.FromArgb(255, 253, 248);
             _autoLogBox.BorderStyle = BorderStyle.FixedSingle;
             _autoLogBox.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point, 0);
 
@@ -672,11 +721,11 @@ namespace LitchiOzonRecovery
 
         private TabPage BuildBrowserTab()
         {
-            TabPage tab = CreateTabPage("插件浏览器");
+            TabPage tab = CreateTabPage(T("browser"));
 
             FlowLayoutPanel actions = CreateActionBar();
-            actions.Controls.Add(CreateButton("初始化插件浏览器", InitializeBrowser, true));
-            actions.Controls.Add(CreateButton("打开网址", NavigateBrowser, false));
+            actions.Controls.Add(CreateButton(T("initBrowser"), InitializeBrowser, true));
+            actions.Controls.Add(CreateButton(T("openUrl"), NavigateBrowser, false));
 
             Label urlLabel = new Label();
             urlLabel.Text = "网址：";
@@ -693,7 +742,7 @@ namespace LitchiOzonRecovery
             summary.Dock = DockStyle.Top;
             summary.Height = 54;
             summary.Padding = new Padding(16, 12, 16, 0);
-            summary.BackColor = Color.White;
+            summary.BackColor = ShellBack;
 
             _browserStatusLabel = new Label();
             _browserStatusLabel.Dock = DockStyle.Top;
@@ -717,7 +766,6 @@ namespace LitchiOzonRecovery
 
         private void LoadAll()
         {
-            _databaseErrorMessage = null;
             _assetErrorMessage = null;
 
             SetStatus("正在加载恢复工作台...");
@@ -733,28 +781,11 @@ namespace LitchiOzonRecovery
                 ClearAssetViews();
             }
 
-            try
-            {
-                LoadDatabase();
-            }
-            catch (Exception ex)
-            {
-                _databaseErrorMessage = ex.Message;
-                ClearDatabaseViews();
-            }
-
-            ApplyConfigDefaultsToCalculator(null, EventArgs.Empty);
             UpdateOverview();
-
-            if (!string.IsNullOrEmpty(_databaseErrorMessage))
-            {
-                SetStatus("类目和规则已加载，但数据库暂不可用：" + _databaseErrorMessage);
-                return;
-            }
 
             if (!string.IsNullOrEmpty(_assetErrorMessage))
             {
-                SetStatus("数据库已加载，但类目/规则读取失败：" + _assetErrorMessage);
+                SetStatus("类目/规则读取失败：" + _assetErrorMessage);
                 return;
             }
 
@@ -765,7 +796,26 @@ namespace LitchiOzonRecovery
         {
             EnsureSnapshot();
             _snapshot.Config = ConfigService.Load(_paths.ConfigFile);
+            _uiLanguage = NormalizeUiLanguage(_snapshot.Config == null ? null : _snapshot.Config.UiLanguage);
             _configGrid.SelectedObject = _snapshot.Config;
+            if (_languageComboBox != null)
+            {
+                _languageComboBox.SelectedIndex = LanguageIndexFromCode(_uiLanguage);
+            }
+            ApplyOzonSellerDefaults();
+        }
+
+        private void ApplyOzonSellerDefaults()
+        {
+            if (_ozonClientIdBox != null && string.IsNullOrWhiteSpace(_ozonClientIdBox.Text))
+            {
+                _ozonClientIdBox.Text = DefaultOzonClientId;
+            }
+
+            if (_ozonApiKeyBox != null && string.IsNullOrWhiteSpace(_ozonApiKeyBox.Text))
+            {
+                _ozonApiKeyBox.Text = DefaultOzonApiKey;
+            }
         }
 
         private void SaveConfig(object sender, EventArgs e)
@@ -778,37 +828,15 @@ namespace LitchiOzonRecovery
                     return;
                 }
 
+                config.UiLanguage = _uiLanguage;
                 ConfigService.Save(_paths.ConfigFile, config);
                 UpdateOverview();
-                ApplyConfigDefaultsToCalculator(null, EventArgs.Empty);
                 SetStatus("配置已保存。");
             }
             catch (Exception ex)
             {
                 MessageBox.Show(this, ex.ToString(), "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
-        }
-
-        private void LoadDatabase()
-        {
-            EnsureSnapshot();
-            _snapshot.TableCounts = _databaseService.GetTableCounts();
-            _databaseErrorMessage = null;
-
-            long skuCount = _snapshot.TableCounts["SkuTable"];
-            long shopCount = _snapshot.TableCounts["ShopTable"];
-            long catchCount = _snapshot.TableCounts["tb_catch_shop"];
-            long total = skuCount + shopCount + catchCount;
-
-            _dbSummaryLabel.Text = string.Format("当前记录数：SKU 表 {0} 条，店铺表 {1} 条，抓取店铺表 {2} 条。", skuCount, shopCount, catchCount);
-            _dbBatchSummaryLabel.Text = total == 0
-                ? "当前基线数据库为空，可以直接在右侧粘贴 ID 批量入库。"
-                : "可在右侧批量整理 ID，再导入当前选中的表。";
-
-            _skuGrid.DataSource = _databaseService.GetPreview("SkuTable", 200);
-            _shopGrid.DataSource = _databaseService.GetPreview("ShopTable", 200);
-            _catchGrid.DataSource = _databaseService.GetPreview("tb_catch_shop", 200);
-            UpdateOverview();
         }
 
         private void LoadAssets()
@@ -833,56 +861,43 @@ namespace LitchiOzonRecovery
             int pluginFileCount = Directory.Exists(_paths.Plugin1688Folder)
                 ? Directory.GetFiles(_paths.Plugin1688Folder, "*", SearchOption.AllDirectories).Length
                 : 0;
-            long dbTotal = GetCount("SkuTable") + GetCount("ShopTable") + GetCount("tb_catch_shop");
 
             if (_cardCategoryValue != null) _cardCategoryValue.Text = categoryCount.ToString();
             if (_cardFeeValue != null) _cardFeeValue.Text = feeCount.ToString();
             if (_cardPluginValue != null) _cardPluginValue.Text = pluginFileCount.ToString();
-            if (_cardDbValue != null) _cardDbValue.Text = dbTotal.ToString();
 
             string updaterPath = _paths.FindUpdaterExecutable();
             StringBuilder builder = new StringBuilder();
-            builder.AppendLine("资源路径");
+            builder.AppendLine(T("resourcePaths"));
             builder.AppendLine("--------");
-            builder.AppendLine("工作区目录：" + _paths.WorkRoot);
-            builder.AppendLine("基线目录：" + _paths.BaselineRoot);
-            builder.AppendLine("配置文件：" + _paths.ConfigFile);
-            builder.AppendLine("数据库文件：" + _paths.DatabaseFile);
-            builder.AppendLine("1688 插件：" + _paths.Plugin1688Folder);
-            builder.AppendLine("更新器程序：" + SafeValue(updaterPath));
+            builder.AppendLine(T("workRoot") + _paths.WorkRoot);
+            builder.AppendLine(T("baselineRoot") + _paths.BaselineRoot);
+            builder.AppendLine(T("configFile") + _paths.ConfigFile);
+            builder.AppendLine(T("plugin1688") + _paths.Plugin1688Folder);
+            builder.AppendLine(T("updaterPath") + SafeValue(updaterPath));
             builder.AppendLine();
-            builder.AppendLine("恢复状态");
+            builder.AppendLine(T("recoveryStatus"));
             builder.AppendLine("--------");
-            builder.AppendLine("类目节点：" + categoryCount + " 个");
-            builder.AppendLine("运费规则：" + feeCount + " 条");
-            builder.AppendLine("插件文件：" + pluginFileCount + " 个");
-            builder.AppendLine("数据库总量：" + dbTotal + " 条");
-            builder.AppendLine(dbTotal == 0
-                ? "数据库说明：当前发布包内的基线库本身为空，没有找到额外业务数据备份。"
-                : "数据库说明：当前已读取到可用记录，可在数据库页继续批量管理。");
-
-            if (!string.IsNullOrEmpty(_databaseErrorMessage))
-            {
-                builder.AppendLine("数据库状态：加载失败");
-                builder.AppendLine("失败原因：" + _databaseErrorMessage);
-            }
+            builder.AppendLine(T("categoryCountLine") + categoryCount);
+            builder.AppendLine(T("feeCountLine") + feeCount);
+            builder.AppendLine(T("pluginCountLine") + pluginFileCount);
 
             if (!string.IsNullOrEmpty(_assetErrorMessage))
             {
-                builder.AppendLine("类目/规则状态：加载失败");
-                builder.AppendLine("失败原因：" + _assetErrorMessage);
+                builder.AppendLine(T("assetLoadFailed"));
+                builder.AppendLine(T("failureReason") + _assetErrorMessage);
             }
 
             builder.AppendLine();
-            builder.AppendLine("当前筛选配置");
+            builder.AppendLine(T("currentFilters"));
             builder.AppendLine("------------");
-            builder.AppendLine("保存目录：" + SafeValue(_snapshot.Config == null ? null : _snapshot.Config.SaveUrl));
-            builder.AppendLine("售价范围：" + (_snapshot.Config == null ? 0 : _snapshot.Config.MinPirce) + " ~ " + (_snapshot.Config == null ? 0 : _snapshot.Config.MaxPrice));
-            builder.AppendLine("最低利润率：" + (_snapshot.Config == null ? 0 : _snapshot.Config.MinProfitPer) + "%");
-            builder.AppendLine("默认运费：" + (_snapshot.Config == null ? 0 : _snapshot.Config.DeliveryFee));
-            builder.AppendLine("启用 1688：" + YesNo(_snapshot.Config != null && _snapshot.Config.Is1688));
-            builder.AppendLine("自动导出：" + YesNo(_snapshot.Config != null && _snapshot.Config.IsAutoExport));
-            builder.AppendLine("云筛选：" + YesNo(_snapshot.Config != null && _snapshot.Config.IsCloudFilter));
+            builder.AppendLine(T("saveDir") + SafeValue(_snapshot.Config == null ? null : _snapshot.Config.SaveUrl));
+            builder.AppendLine(T("priceRange") + (_snapshot.Config == null ? 0 : _snapshot.Config.MinPirce) + " ~ " + (_snapshot.Config == null ? 0 : _snapshot.Config.MaxPrice));
+            builder.AppendLine(T("minProfit") + (_snapshot.Config == null ? 0 : _snapshot.Config.MinProfitPer) + "%");
+            builder.AppendLine(T("defaultShipping") + (_snapshot.Config == null ? 0 : _snapshot.Config.DeliveryFee));
+            builder.AppendLine(T("enable1688") + YesNo(_snapshot.Config != null && _snapshot.Config.Is1688));
+            builder.AppendLine(T("autoExport") + YesNo(_snapshot.Config != null && _snapshot.Config.IsAutoExport));
+            builder.AppendLine(T("cloudFilter") + YesNo(_snapshot.Config != null && _snapshot.Config.IsCloudFilter));
 
             if (!string.IsNullOrEmpty(_fullAutoReport))
             {
@@ -893,25 +908,6 @@ namespace LitchiOzonRecovery
             }
 
             _overviewBox.Text = builder.ToString();
-        }
-
-        private void LaunchUpdater(object sender, EventArgs e)
-        {
-            string url = PromptDialog.Show(this, "运行更新器", "请输入更新接口地址：", string.Empty);
-            if (string.IsNullOrEmpty(url))
-            {
-                return;
-            }
-
-            try
-            {
-                _updaterService.Launch(url);
-                SetStatus("更新器已启动。");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.ToString(), "更新器启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
         }
 
         private void ExportFeeRules(object sender, EventArgs e)
@@ -960,7 +956,7 @@ namespace LitchiOzonRecovery
 
             _categoryTree.EndUpdate();
             _feeGrid.DataSource = null;
-            _feeGrid.DataSource = rules;
+            _feeGrid.DataSource = BuildFeeRuleDisplayRows(rules);
         }
 
         private void UseSelectedFeeRule(object sender, EventArgs e)
@@ -972,12 +968,21 @@ namespace LitchiOzonRecovery
                 return;
             }
 
-            _calcCategory1Box.Text = rule.CategoryId1.ToString();
-            _calcCategory2Box.Text = rule.CategoryId2.ToString();
-            FillAutomationCategory(rule.CategoryId1.ToString(), rule.CategoryId2.ToString(), rule.Category2);
+            CategoryNode mappedNode = FindBestLeafCategoryForFeeRule(_snapshot == null ? null : _snapshot.Categories, rule);
+            if (mappedNode == null)
+            {
+                SetStatus("这条运费规则没有匹配到可上传的 Ozon 类目，请从左侧类目树双击一个叶子类目。");
+                return;
+            }
+
+            string categoryId = ResolveUploadCategoryId(mappedNode);
+            string typeId = string.IsNullOrEmpty(mappedNode.DescriptionTypeId) ? "0" : mappedNode.DescriptionTypeId;
+            string keyword = !string.IsNullOrEmpty(mappedNode.DescriptionTypeName)
+                ? mappedNode.DescriptionTypeName
+                : (!string.IsNullOrEmpty(rule.Category2) ? rule.Category2 : mappedNode.DescriptionCategoryName);
+            FillAutomationCategory(categoryId, typeId, keyword);
             _mainTabs.SelectedIndex = 4;
-            SetStatus("已把选中规则对应的类目带入利润测算。");
-            CalculateProfit(null, EventArgs.Empty);
+            SetStatus(T("ruleAppliedToAuto") + " [" + categoryId + "/" + typeId + "]");
         }
 
         private void UseSelectedCategoryForAutomation(object sender, TreeNodeMouseClickEventArgs e)
@@ -998,7 +1003,7 @@ namespace LitchiOzonRecovery
                 }
             }
 
-            string categoryId = string.IsNullOrEmpty(node.DescriptionCategoryId) ? "0" : node.DescriptionCategoryId;
+            string categoryId = ResolveUploadCategoryId(node);
             string typeId = string.IsNullOrEmpty(node.DescriptionTypeId) ? "0" : node.DescriptionTypeId;
             string keyword = !string.IsNullOrEmpty(node.DescriptionTypeName)
                 ? node.DescriptionTypeName
@@ -1026,7 +1031,7 @@ namespace LitchiOzonRecovery
 
             if (_autoKeywordsBox != null && !string.IsNullOrEmpty(keyword))
             {
-                _autoKeywordsBox.Text = BuildEnglishKeyword(keyword);
+                _autoKeywordsBox.Text = keyword;
             }
             else if (_autoKeywordsBox != null)
             {
@@ -1034,17 +1039,91 @@ namespace LitchiOzonRecovery
             }
         }
 
+        private List<FeeRuleDisplayRow> BuildFeeRuleDisplayRows(IList<FeeRule> rules)
+        {
+            List<FeeRuleDisplayRow> rows = new List<FeeRuleDisplayRow>();
+            for (int i = 0; rules != null && i < rules.Count; i++)
+            {
+                FeeRule rule = rules[i];
+                if (rule == null)
+                {
+                    continue;
+                }
+
+                rows.Add(new FeeRuleDisplayRow
+                {
+                    Rule = rule,
+                    Id = rule.Id,
+                    CategoryId1 = rule.CategoryId1,
+                    CategoryId2 = rule.CategoryId2,
+                    Category1 = BuildBilingualCategoryName(rule.Category1),
+                    Category2 = BuildBilingualCategoryName(rule.Category2),
+                    FBS = rule.FBS,
+                    FBS1500 = rule.FBS1500,
+                    FBS5000 = rule.FBS5000,
+                    FBP = rule.FBP,
+                    FBP1500 = rule.FBP1500,
+                    FBP5000 = rule.FBP5000,
+                    FBO = rule.FBO,
+                    FBO1500 = rule.FBO1500,
+                    FBO5000 = rule.FBO5000
+                });
+            }
+
+            return rows;
+        }
+
+        private string BuildBilingualCategoryName(string name)
+        {
+            string text = string.IsNullOrEmpty(name) ? string.Empty : name.Trim();
+            if (string.IsNullOrEmpty(text) || IsAsciiKeyword(text))
+            {
+                return text;
+            }
+
+            string english = BuildEnglishKeywordFromRules(text);
+            if (string.IsNullOrEmpty(english))
+            {
+                english = MakeFallbackKeywordFromCategory(text);
+            }
+
+            return text + " / " + english;
+        }
+
         private string BuildEnglishKeyword(string keyword)
         {
             string text = string.IsNullOrEmpty(keyword) ? string.Empty : keyword.Trim();
             if (string.IsNullOrEmpty(text))
             {
-                return "general merchandise";
+                return string.Empty;
             }
 
             if (IsAsciiKeyword(text))
             {
                 return text;
+            }
+
+            string ruleKeyword = BuildEnglishKeywordFromRules(text);
+            if (!string.IsNullOrEmpty(ruleKeyword))
+            {
+                return ruleKeyword;
+            }
+
+            string aiKeyword = _automationService.GenerateEnglishCategoryKeyword(text);
+            if (!string.IsNullOrEmpty(aiKeyword) &&
+                aiKeyword.IndexOf("general merchandise", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return aiKeyword;
+            }
+
+            return MakeFallbackKeywordFromCategory(text);
+        }
+
+        private string BuildEnglishKeywordFromRules(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
             }
 
             if (ContainsAny(text, "\u60c5\u8da3", "\u6210\u4eba", "\u6027\u7231", "\u907f\u5b55", "\u5b89\u5168\u5957", "\u79c1\u5904"))
@@ -1054,6 +1133,8 @@ namespace LitchiOzonRecovery
 
             string[,] map = new string[,]
             {
+                { "\u5c0f\u5de5\u5177", "hand tool accessory" },
+                { "\u5546\u4e1a\u8bbe\u5907", "commercial equipment" },
                 { "\u6253\u5370\u8017\u6750", "printer supplies" },
                 { "\u58a8\u76d2", "printer ink cartridge" },
                 { "\u7852\u9f13", "printer toner cartridge" },
@@ -1123,7 +1204,30 @@ namespace LitchiOzonRecovery
                 }
             }
 
-            return "general merchandise";
+            return string.Empty;
+        }
+
+        private string MakeFallbackKeywordFromCategory(string category)
+        {
+            string text = category ?? string.Empty;
+            if (ContainsAny(text, "\u5c0f\u5de5\u5177"))
+            {
+                return "hand tool accessory";
+            }
+            if (ContainsAny(text, "\u5546\u4e1a\u8bbe\u5907"))
+            {
+                return "commercial equipment";
+            }
+            if (ContainsAny(text, "\u7535\u5b50\u4ea7\u54c1"))
+            {
+                return "electronics accessory";
+            }
+            if (ContainsAny(text, "\u65e5\u7528\u54c1"))
+            {
+                return "household supplies";
+            }
+
+            return "category specific product";
         }
 
         private bool ContainsAny(string text, params string[] needles)
@@ -1152,267 +1256,86 @@ namespace LitchiOzonRecovery
             return true;
         }
 
-        private void ApplyConfigDefaultsToCalculator(object sender, EventArgs e)
+        private bool StartCurrentProcess(string name)
         {
-            EnsureSnapshot();
-            AppConfig config = _snapshot.Config ?? AppConfig.CreateDefault();
-            _calcDeliveryFeeBox.Text = config.DeliveryFee.ToString();
-            _calcTargetProfitBox.Text = config.MinProfitPer.ToString();
-        }
-
-        private void CalculateProfit(object sender, EventArgs e)
-        {
-            if (_snapshot == null || _snapshot.Config == null || _snapshot.FeeRules == null)
+            if (_currentProcessCancel != null && !_currentProcessCancel.IsCancellationRequested)
             {
-                return;
+                SetStatus("Another process is already running: " + _currentProcessName);
+                return false;
             }
 
-            ProfitInput input = new ProfitInput();
-            input.CategoryId1 = ParseLong(_calcCategory1Box.Text);
-            input.CategoryId2 = ParseLong(_calcCategory2Box.Text);
-            input.SourcePrice = ParseDecimal(_calcSourcePriceBox.Text);
-            input.WeightGrams = ParseDecimal(_calcWeightBox.Text);
-            input.DeliveryFee = ParseDecimal(_calcDeliveryFeeBox.Text);
-            input.OtherCost = ParseDecimal(_calcOtherCostBox.Text);
-            input.TargetProfitPercent = ParseDecimal(_calcTargetProfitBox.Text);
-            input.ManualSellingPrice = ParseDecimal(_calcManualPriceBox.Text);
-            input.FulfillmentMode = Convert.ToString(_calcModeCombo.SelectedItem);
-
-            ProfitEstimate estimate = ProfitCalculatorService.Calculate(_snapshot.Config, _snapshot.FeeRules, input);
-            _calcResultBox.Text = BuildProfitResultText(input, estimate);
-            SetStatus("利润测算已更新。");
+            _currentProcessCancel = new CancellationTokenSource();
+            _currentProcessName = name;
+            return true;
         }
 
-        private string BuildProfitResultText(ProfitInput input, ProfitEstimate estimate)
+        private void FinishCurrentProcess()
         {
-            StringBuilder builder = new StringBuilder();
-            builder.AppendLine("测算输入");
-            builder.AppendLine("--------");
-            builder.AppendLine("一级类目 ID：" + input.CategoryId1);
-            builder.AppendLine("二级类目 ID：" + input.CategoryId2);
-            builder.AppendLine("履约模式：" + input.FulfillmentMode);
-            builder.AppendLine("采购成本：" + input.SourcePrice);
-            builder.AppendLine("重量(g)：" + input.WeightGrams);
-            builder.AppendLine();
-            builder.AppendLine("测算结果");
-            builder.AppendLine("--------");
-            builder.AppendLine("匹配规则：" + (estimate.MatchedRule == null ? "未找到" : estimate.MatchedRule.ToString()));
-            builder.AppendLine("物流费用：" + estimate.LogisticsFee);
-            builder.AppendLine("总成本：" + estimate.EstimatedCost);
-            builder.AppendLine("建议售价：" + estimate.SuggestedSellingPrice);
-            builder.AppendLine("实际售价：" + estimate.ActualSellingPrice);
-            builder.AppendLine("利润金额：" + estimate.ProfitAmount);
-            builder.AppendLine("利润率：" + estimate.ProfitPercent + "%");
-            builder.AppendLine("满足价格筛选：" + YesNo(estimate.MeetsPriceFilter));
-            builder.AppendLine("满足重量筛选：" + YesNo(estimate.MeetsWeightFilter));
-            builder.AppendLine("满足利润筛选：" + YesNo(estimate.MeetsProfitFilter));
-            builder.AppendLine();
-            builder.AppendLine("说明");
-            builder.AppendLine("----");
-            builder.AppendLine(estimate.Notes);
-            return builder.ToString();
-        }
-
-        private void AppendIdsIntoTable(object sender, EventArgs e)
-        {
-            ImportIds(false);
-        }
-
-        private void ReplaceIdsIntoTable(object sender, EventArgs e)
-        {
-            ImportIds(true);
-        }
-
-        private void ImportIds(bool replaceAll)
-        {
-            string tableName = Convert.ToString(_dbTableSelector.SelectedItem);
-            OpenFileDialog dialog = new OpenFileDialog();
-            dialog.Filter = "支持文件|*.txt;*.csv;*.tsv;*.xlsx|文本文件|*.txt;*.csv;*.tsv|Excel|*.xlsx|所有文件|*.*";
-
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            if (_currentProcessCancel != null)
             {
-                return;
+                _currentProcessCancel.Dispose();
+                _currentProcessCancel = null;
+            }
+
+            _currentProcessName = null;
+        }
+
+        private void ThrowIfCurrentProcessStopped()
+        {
+            if (_currentProcessCancel != null && _currentProcessCancel.IsCancellationRequested)
+            {
+                throw new OperationCanceledException();
+            }
+        }
+
+        private void EmergencyStopCurrentProcess(object sender, EventArgs e)
+        {
+            if (_currentProcessCancel != null)
+            {
+                _currentProcessCancel.Cancel();
             }
 
             try
             {
-                List<string> ids = TableFileService.ReadIds(dialog.FileName);
-                int saved = replaceAll
-                    ? _databaseService.ReplaceIds(tableName, ids)
-                    : _databaseService.AppendIds(tableName, ids);
-                LoadDatabase();
-                SetStatus((replaceAll ? "已覆盖导入 " : "已追加导入 ") + saved + " 条到 " + tableName + "。");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.ToString(), "导入失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void ImportPastedIdsIntoTable(object sender, EventArgs e)
-        {
-            string tableName = Convert.ToString(_dbTableSelector.SelectedItem);
-            List<string> ids = ParseIdsFromBatchInput();
-            if (ids.Count == 0)
-            {
-                SetStatus("批量粘贴区为空，没有可导入的 ID。");
-                return;
-            }
-
-            try
-            {
-                int saved = _databaseService.AppendIds(tableName, ids);
-                LoadDatabase();
-                _dbBatchSummaryLabel.Text = "已从粘贴区向 " + tableName + " 导入 " + saved + " 条。";
-                SetStatus("批量粘贴导入完成。");
-            }
-            catch (Exception ex)
-            {
-                _databaseErrorMessage = ex.Message;
-                _dbBatchSummaryLabel.Text = "导入失败：" + ex.Message;
-                SetStatus("批量导入失败：" + ex.Message);
-            }
-        }
-
-        private void ClearCurrentTable(object sender, EventArgs e)
-        {
-            string tableName = Convert.ToString(_dbTableSelector.SelectedItem);
-            DialogResult confirm = MessageBox.Show(
-                this,
-                "确认清空当前表“" + tableName + "”吗？此操作不可撤销。",
-                "确认清空",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-
-            if (confirm != DialogResult.Yes)
-            {
-                return;
-            }
-
-            try
-            {
-                _databaseService.ReplaceIds(tableName, new List<string>());
-                LoadDatabase();
-                _dbBatchSummaryLabel.Text = tableName + " 已清空。";
-                SetStatus("当前表已清空。");
-            }
-            catch (Exception ex)
-            {
-                _databaseErrorMessage = ex.Message;
-                SetStatus("清空失败：" + ex.Message);
-            }
-        }
-
-        private void AnalyzePastedIds(object sender, EventArgs e)
-        {
-            List<string> ids = ParseIdsFromBatchInput();
-            _dbBatchSummaryLabel.Text = "粘贴区已识别 " + ids.Count + " 条唯一 ID。";
-            SetStatus("已统计批量粘贴区。");
-        }
-
-        private void ClearPastedIds(object sender, EventArgs e)
-        {
-            _dbBatchInputBox.Text = string.Empty;
-            _dbBatchSummaryLabel.Text = "批量粘贴区已清空。";
-            SetStatus("批量粘贴区已清空。");
-        }
-
-        private void NormalizePastedIds(object sender, EventArgs e)
-        {
-            List<string> ids = ParseIdsFromBatchInput();
-            StringBuilder builder = new StringBuilder();
-            int i;
-            for (i = 0; i < ids.Count; i++)
-            {
-                builder.AppendLine(ids[i]);
-            }
-
-            _dbBatchInputBox.Text = builder.ToString();
-            _dbBatchSummaryLabel.Text = "已整理并去重，共 " + ids.Count + " 条。";
-            SetStatus("批量粘贴区已整理。");
-        }
-
-        private void PasteFromClipboard(object sender, EventArgs e)
-        {
-            try
-            {
-                if (!Clipboard.ContainsText())
+                if (_browser != null && _browser.CoreWebView2 != null)
                 {
-                    SetStatus("剪贴板里没有文本内容。");
-                    return;
+                    _browser.CoreWebView2.Stop();
                 }
-
-                string text = Clipboard.GetText();
-                if (string.IsNullOrEmpty(text))
-                {
-                    SetStatus("剪贴板里没有文本内容。");
-                    return;
-                }
-
-                if (!string.IsNullOrEmpty(_dbBatchInputBox.Text))
-                {
-                    _dbBatchInputBox.AppendText(Environment.NewLine);
-                }
-
-                _dbBatchInputBox.AppendText(text);
-                AnalyzePastedIds(null, EventArgs.Empty);
             }
-            catch (Exception ex)
+            catch
             {
-                SetStatus("读取剪贴板失败：" + ex.Message);
             }
+
+            _fullAutoReport = "Emergency brake pressed: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine +
+                "Current process: " + SafeValue(_currentProcessName) + Environment.NewLine +
+                "The running browser/navigation task was asked to stop.";
+            _mainTabs.SelectedIndex = 0;
+            UpdateOverview();
+            SetStatus("Emergency brake requested.");
         }
 
-        private void ExportIdsFromTable(object sender, EventArgs e)
+        private List<string> GetSeedKeywords(IList<SourcingSeed> seeds)
         {
-            string tableName = Convert.ToString(_dbTableSelector.SelectedItem);
-            SaveFileDialog dialog = new SaveFileDialog();
-            dialog.FileName = tableName + "-导出.txt";
-            dialog.Filter = "文本文件|*.txt|Excel|*.xlsx|所有文件|*.*";
-
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            List<string> values = new List<string>();
+            for (int i = 0; seeds != null && i < seeds.Count; i++)
             {
-                return;
-            }
-
-            try
-            {
-                List<string> ids = _databaseService.GetAllIds(tableName);
-                TableFileService.WriteIds(dialog.FileName, ids);
-                _paths.OpenPath(dialog.FileName);
-                SetStatus("已从 " + tableName + " 导出 " + ids.Count + " 条。");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.ToString(), "导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private List<string> ParseIdsFromBatchInput()
-        {
-            string content = _dbBatchInputBox == null ? string.Empty : _dbBatchInputBox.Text;
-            string[] raw = content.Replace("\r", "\n").Split(new char[] { '\n', ',', ';', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            Dictionary<string, bool> unique = new Dictionary<string, bool>();
-            List<string> ids = new List<string>();
-
-            int i;
-            for (i = 0; i < raw.Length; i++)
-            {
-                string value = raw[i].Trim();
-                if (string.IsNullOrEmpty(value) || unique.ContainsKey(value))
+                if (seeds[i] != null && !string.IsNullOrEmpty(seeds[i].Keyword))
                 {
-                    continue;
+                    values.Add(seeds[i].Keyword);
                 }
-
-                unique[value] = true;
-                ids.Add(value);
             }
 
-            return ids;
+            return values;
         }
 
         private async void RunAutoSourcing(object sender, EventArgs e)
         {
+            if (!StartCurrentProcess("Run 1688 selection"))
+            {
+                return;
+            }
+
+            StringBuilder report = new StringBuilder();
             try
             {
                 EnsureSnapshot();
@@ -1425,29 +1348,62 @@ namespace LitchiOzonRecovery
                     return;
                 }
 
+                _mainTabs.SelectedIndex = 5;
+                report.AppendLine("Manual 1688 selection brief");
+                report.AppendLine("---------------------------");
+                report.AppendLine("Start: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                report.AppendLine("Keywords: " + string.Join(", ", GetSeedKeywords(seeds).ToArray()));
                 SetStatus("Running 1688 selection...");
+                ThrowIfCurrentProcessStopped();
                 _lastSourcingResult = await Collect1688CandidatesFromBrowser(seeds, _snapshot.Config, options);
+                ThrowIfCurrentProcessStopped();
                 _autoResultGrid.DataSource = _lastSourcingResult.Products;
                 WriteAutomationLog(_lastSourcingResult.Logs);
+                report.AppendLine("Candidates: " + _lastSourcingResult.Products.Count);
+                report.AppendLine("End: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                _fullAutoReport = report.ToString();
+                _mainTabs.SelectedIndex = 0;
+                UpdateOverview();
                 SetStatus("1688 selection finished: " + _lastSourcingResult.Products.Count + " candidates.");
+            }
+            catch (OperationCanceledException)
+            {
+                report.AppendLine("Stopped by emergency brake: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                _fullAutoReport = report.ToString();
+                _mainTabs.SelectedIndex = 0;
+                UpdateOverview();
+                SetStatus("Current process stopped.");
             }
             catch (Exception ex)
             {
                 AppendAutomationLog("ERROR: " + ex.Message);
+                report.AppendLine("ERROR: " + ex.Message);
+                _fullAutoReport = report.ToString();
+                _mainTabs.SelectedIndex = 0;
+                UpdateOverview();
                 MessageBox.Show(this, ex.ToString(), "Auto sourcing failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 SetStatus("Auto sourcing failed: " + ex.Message);
+            }
+            finally
+            {
+                FinishCurrentProcess();
             }
         }
 
         private async void RunFullAutoLoop(object sender, EventArgs e)
         {
+            if (!StartCurrentProcess("Full auto loop"))
+            {
+                return;
+            }
+
             StringBuilder report = new StringBuilder();
             try
             {
                 EnsureSnapshot();
                 if (_browser == null || _browser.CoreWebView2 == null)
                 {
-                    _mainTabs.SelectedIndex = 6;
+                    _mainTabs.SelectedIndex = 5;
                     SetStatus("请先初始化插件浏览器并登录 1688，然后再启动全链路循环。");
                     return;
                 }
@@ -1464,6 +1420,7 @@ namespace LitchiOzonRecovery
 
                 for (int i = 0; i < loopCount; i++)
                 {
+                    ThrowIfCurrentProcessStopped();
                     CategoryNode category = PickRandomOzonLeafCategory();
                     if (category == null)
                     {
@@ -1472,22 +1429,28 @@ namespace LitchiOzonRecovery
                     }
 
                     string categoryKeyword = !string.IsNullOrEmpty(category.DescriptionTypeName) ? category.DescriptionTypeName : category.DescriptionCategoryName;
-                    _mainTabs.SelectedIndex = 3;
-                    FillAutomationCategory(category.DescriptionCategoryId, category.DescriptionTypeId, categoryKeyword);
+                    _mainTabs.SelectedIndex = 4;
+                    FillAutomationCategory(ResolveUploadCategoryId(category), category.DescriptionTypeId, categoryKeyword);
                     await Task.Delay(300);
 
                     report.AppendLine();
                     report.AppendLine("Round " + (i + 1));
-                    report.AppendLine("Ozon category: " + category.DescriptionCategoryName + " / " + category.DescriptionTypeName + " [" + category.DescriptionCategoryId + "/" + category.DescriptionTypeId + "]");
+                    report.AppendLine("Ozon category: " + category.DescriptionCategoryName + " / " + category.DescriptionTypeName + " [" + ResolveUploadCategoryId(category) + "/" + category.DescriptionTypeId + "]");
                     report.AppendLine("Keyword: " + categoryKeyword);
 
-                    _mainTabs.SelectedIndex = 6;
+                    _mainTabs.SelectedIndex = 5;
                     SourcingOptions options = ReadSourcingOptions();
                     List<SourcingSeed> seeds = ReadSourcingSeeds();
+                    ThrowIfCurrentProcessStopped();
                     _lastSourcingResult = await Collect1688CandidatesFromBrowser(seeds, _snapshot.Config, options);
+                    ThrowIfCurrentProcessStopped();
                     _autoResultGrid.DataSource = _lastSourcingResult.Products;
                     WriteAutomationLog(_lastSourcingResult.Logs);
                     report.AppendLine("选品候选：" + _lastSourcingResult.Products.Count + " 个");
+                    _fullAutoReport = report.ToString();
+                    _mainTabs.SelectedIndex = 0;
+                    UpdateOverview();
+                    SetStatus("1688 抓取完成，正在提交 Ozon 上传...");
 
                     List<SourceProduct> uploadProducts = PickProductsForUpload(_lastSourcingResult.Products);
                     if (uploadProducts.Count == 0)
@@ -1508,6 +1471,7 @@ namespace LitchiOzonRecovery
                         {
                             report.AppendLine("Ozon task submitted: " + uploadProducts.Count + " items, task_id=" + SafeValue(uploadResult.TaskId));
 
+                            ThrowIfCurrentProcessStopped();
                             OzonImportResult importResult = await Task.Run(() => _automationService.WaitForOzonImportInfo(
                                 uploadResult.TaskId,
                                 _ozonClientIdBox.Text.Trim(),
@@ -1517,6 +1481,47 @@ namespace LitchiOzonRecovery
 
                             report.AppendLine("Ozon import result:");
                             report.AppendLine(importResult.ImportSummary);
+                            importResult = await RetryFailedOzonImportsOnce(uploadProducts, options, importResult, _ozonClientIdBox.Text.Trim(), _ozonApiKeyBox.Text.Trim(), delegate(string line)
+                            {
+                                report.AppendLine(line);
+                            });
+                            if (importResult.AcceptedOfferIds.Count > 0)
+                            {
+                                if (!importResult.Success)
+                                {
+                                    report.AppendLine("Ozon import had partial failures, but accepted offers will still continue to SKU/stock update.");
+                                }
+
+                                try
+                                {
+                                    List<string> readyOfferIds = await WaitForSkuCreationWithBrief(report, importResult.AcceptedOfferIds, 20, 30000);
+                                    if (readyOfferIds.Count == 0)
+                                    {
+                                        report.AppendLine("Ozon SKU creation is still pending; stock update skipped until SKU exists.");
+                                    }
+                                    else
+                                    {
+                                        report.AppendLine("SKU 已创建，正在设置库存 100...");
+                                        _fullAutoReport = report.ToString();
+                                        UpdateOverview();
+                                        string stockResponse = await Task.Run(() => _automationService.SetOzonStockTo100(
+                                            readyOfferIds,
+                                            _ozonClientIdBox.Text.Trim(),
+                                            _ozonApiKeyBox.Text.Trim()));
+                                        report.AppendLine("Ozon stock set to 100: " + stockResponse);
+                                    }
+                                }
+                                catch (Exception stockEx)
+                                {
+                                    report.AppendLine("Ozon stock update failed: " + stockEx.Message);
+                                    string stockLogPath = WriteExceptionLog("ozon-stock", stockEx, report.ToString());
+                                    if (!string.IsNullOrEmpty(stockLogPath))
+                                    {
+                                        report.AppendLine("库存异常日志：" + stockLogPath);
+                                    }
+                                }
+                            }
+
                             if (!importResult.Success)
                             {
                                 report.AppendLine("Ozon import was not accepted. Check missing attributes/category requirements above.");
@@ -1525,11 +1530,18 @@ namespace LitchiOzonRecovery
                         else
                         {
                             report.AppendLine("Ozon upload failed: " + uploadResult.ErrorMessage);
+                            report.AppendLine("本轮未成功上架到 Ozon，请以上传失败/校验失败信息为准。");
                         }
                     }
                     catch (Exception uploadEx)
                     {
                         report.AppendLine("Ozon upload exception: " + uploadEx.Message);
+                        string uploadLogPath = WriteExceptionLog("ozon-upload", uploadEx, report.ToString());
+                        if (!string.IsNullOrEmpty(uploadLogPath))
+                        {
+                            report.AppendLine("上传异常日志：" + uploadLogPath);
+                        }
+                        report.AppendLine("本轮未成功上架到 Ozon，请先处理上述异常后再重试。");
                     }
 
                     _fullAutoReport = report.ToString();
@@ -1543,15 +1555,33 @@ namespace LitchiOzonRecovery
                 UpdateOverview();
                 SetStatus("全链路自动循环完成。");
             }
+            catch (OperationCanceledException)
+            {
+                report.AppendLine();
+                report.AppendLine("Stopped by emergency brake: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                _fullAutoReport = report.ToString();
+                _mainTabs.SelectedIndex = 0;
+                UpdateOverview();
+                SetStatus("Current process stopped.");
+            }
             catch (Exception ex)
             {
                 report.AppendLine();
                 report.AppendLine("异常：" + ex.Message);
+                string fullRunLogPath = WriteExceptionLog("full-auto", ex, report.ToString());
+                if (!string.IsNullOrEmpty(fullRunLogPath))
+                {
+                    report.AppendLine("完整异常日志：" + fullRunLogPath);
+                }
                 _fullAutoReport = report.ToString();
                 _mainTabs.SelectedIndex = 0;
                 UpdateOverview();
                 MessageBox.Show(this, ex.ToString(), "全链路自动循环失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 SetStatus("全链路自动循环失败：" + ex.Message);
+            }
+            finally
+            {
+                FinishCurrentProcess();
             }
         }
 
@@ -1580,6 +1610,77 @@ namespace LitchiOzonRecovery
             return candidates[_random.Next(candidates.Count)];
         }
 
+        private async Task<List<string>> WaitForSkuCreationWithBrief(StringBuilder report, IList<string> offerIds, int attempts, int delayMs)
+        {
+            List<string> ready = new List<string>();
+            if (offerIds == null || offerIds.Count == 0)
+            {
+                report.AppendLine("SKU wait skipped: no accepted offer_id values.");
+                return ready;
+            }
+
+            _mainTabs.SelectedIndex = 0;
+            report.AppendLine("绛夊緟 Ozon 鍒涘缓 SKU...");
+            _fullAutoReport = report.ToString();
+            UpdateOverview();
+
+            int maxAttempts = attempts <= 0 ? 20 : attempts;
+            int wait = delayMs <= 0 ? 30000 : delayMs;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                ThrowIfCurrentProcessStopped();
+                if (attempt > 0)
+                {
+                    await Task.Delay(wait);
+                }
+
+                Dictionary<string, string> skuByOffer = await Task.Run(() => _automationService.GetOzonSkuMap(
+                    offerIds,
+                    _ozonClientIdBox.Text.Trim(),
+                    _ozonApiKeyBox.Text.Trim()));
+
+                ready.Clear();
+                for (int i = 0; i < offerIds.Count; i++)
+                {
+                    string offerId = offerIds[i];
+                    if (skuByOffer.ContainsKey(offerId) && !string.IsNullOrEmpty(skuByOffer[offerId]))
+                    {
+                        ready.Add(offerId);
+                    }
+                }
+
+                report.AppendLine("SKU 检查 " + (attempt + 1) + "/" + maxAttempts + "：" + ready.Count + "/" + offerIds.Count + " 已创建");
+                int shown = 0;
+                foreach (KeyValuePair<string, string> pair in skuByOffer)
+                {
+                    if (shown >= 5)
+                    {
+                        break;
+                    }
+
+                    report.AppendLine("  " + pair.Key + " -> " + (string.IsNullOrEmpty(pair.Value) ? "绛夊緟 SKU" : "SKU " + pair.Value));
+                    shown += 1;
+                }
+
+                _fullAutoReport = report.ToString();
+                UpdateOverview();
+                SetStatus("等待 Ozon SKU 创建：" + ready.Count + "/" + offerIds.Count + " 已创建");
+
+                if (ready.Count >= offerIds.Count)
+                {
+                    report.AppendLine("SKU 创建完成，可以开始设置库存。");
+                    _fullAutoReport = report.ToString();
+                    UpdateOverview();
+                    return new List<string>(ready);
+                }
+            }
+
+            report.AppendLine("SKU 等待超时：Ozon 仍在处理，已创建 " + ready.Count + "/" + offerIds.Count + "。");
+            _fullAutoReport = report.ToString();
+            UpdateOverview();
+            return new List<string>(ready);
+        }
+
         private CategoryNode PickRandomOzonLeafCategory()
         {
             EnsureSnapshot();
@@ -1599,6 +1700,11 @@ namespace LitchiOzonRecovery
             {
                 CategoryNode node = nodes[i];
                 if (node == null || node.Disabled)
+                {
+                    continue;
+                }
+
+                if (IsHiddenFromAutoLoopCategory(node))
                 {
                     continue;
                 }
@@ -1642,6 +1748,106 @@ namespace LitchiOzonRecovery
             return null;
         }
 
+        private static bool IsHiddenFromAutoLoopCategory(CategoryNode node)
+        {
+            if (node == null)
+            {
+                return false;
+            }
+
+            string text = ((node.DescriptionCategoryName ?? string.Empty) + " " + (node.DescriptionTypeName ?? string.Empty)).ToLowerInvariant();
+            string[] hiddenTerms = new string[]
+            {
+                "成人", "情趣", "避孕", "安全套", "成人用品", "adult", "sex", "sexual", "condom", "эрот"
+            };
+
+            for (int i = 0; i < hiddenTerms.Length; i++)
+            {
+                if (text.IndexOf(hiddenTerms[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string ResolveUploadCategoryId(CategoryNode node)
+        {
+            if (node == null)
+            {
+                return "0";
+            }
+
+            string categoryId = !string.IsNullOrEmpty(node.UploadCategoryId)
+                ? node.UploadCategoryId
+                : node.DescriptionCategoryId;
+            return string.IsNullOrEmpty(categoryId) ? "0" : categoryId;
+        }
+
+        private CategoryNode FindBestLeafCategoryForFeeRule(IList<CategoryNode> nodes, FeeRule rule)
+        {
+            if (rule == null)
+            {
+                return null;
+            }
+
+            CategoryNode bySecondLevel = FindLeafCategoryByCategoryId(nodes, rule.CategoryId2, new List<long>());
+            if (bySecondLevel != null)
+            {
+                return bySecondLevel;
+            }
+
+            return FindLeafCategoryByCategoryId(nodes, rule.CategoryId1, new List<long>());
+        }
+
+        private CategoryNode FindLeafCategoryByCategoryId(IList<CategoryNode> nodes, long targetCategoryId, IList<long> ancestors)
+        {
+            if (targetCategoryId <= 0)
+            {
+                return null;
+            }
+
+            for (int i = 0; nodes != null && i < nodes.Count; i++)
+            {
+                CategoryNode node = nodes[i];
+                if (node == null || node.Disabled)
+                {
+                    continue;
+                }
+
+                List<long> nextAncestors = new List<long>(ancestors);
+                long nodeCategoryId = ParseLong(node.DescriptionCategoryId);
+                if (nodeCategoryId > 0 && !nextAncestors.Contains(nodeCategoryId))
+                {
+                    nextAncestors.Add(nodeCategoryId);
+                }
+
+                string uploadCategoryIdText = ResolveUploadCategoryId(node);
+                long uploadCategoryId = ParseLong(uploadCategoryIdText);
+                bool matches = nodeCategoryId == targetCategoryId ||
+                    uploadCategoryId == targetCategoryId ||
+                    nextAncestors.Contains(targetCategoryId);
+
+                bool isLeaf = !string.IsNullOrEmpty(node.DescriptionTypeId) &&
+                    node.DescriptionTypeId != "0" &&
+                    !string.IsNullOrEmpty(node.DescriptionCategoryId) &&
+                    node.DescriptionCategoryId != "0";
+                if (matches && isLeaf)
+                {
+                    return node;
+                }
+
+                CategoryNode found = FindLeafCategoryByCategoryId(node.Children, targetCategoryId, nextAncestors);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+
+            return null;
+        }
+
         private List<SourceProduct> PickProductsForUpload(IList<SourceProduct> products)
         {
             List<SourceProduct> selected = new List<SourceProduct>();
@@ -1653,18 +1859,72 @@ namespace LitchiOzonRecovery
             for (int i = 0; i < products.Count && selected.Count < 3; i++)
             {
                 SourceProduct product = products[i];
-                if (product != null && string.Equals(product.Decision, "Go", StringComparison.OrdinalIgnoreCase))
+                if (product != null &&
+                    !IsComplianceRestrictedProduct(product) &&
+                    string.Equals(product.Decision, "Go", StringComparison.OrdinalIgnoreCase) &&
+                    IsStrongKeywordMatch(product))
                 {
                     selected.Add(product);
                 }
             }
 
-            if (selected.Count == 0 && products.Count > 0 && products[0] != null)
+            if (selected.Count == 0)
             {
-                selected.Add(products[0]);
+                for (int i = 0; i < products.Count; i++)
+                {
+                    SourceProduct product = products[i];
+                    if (product != null &&
+                        !IsComplianceRestrictedProduct(product) &&
+                        string.Equals(product.Decision, "Watch", StringComparison.OrdinalIgnoreCase) &&
+                        IsStrongKeywordMatch(product))
+                    {
+                        selected.Add(product);
+                        break;
+                    }
+                }
             }
 
             return selected;
+        }
+
+        private static bool IsComplianceRestrictedProduct(SourceProduct product)
+        {
+            if (product == null)
+            {
+                return false;
+            }
+
+            StringBuilder builder = new StringBuilder();
+            builder.Append(product.Title).Append(' ')
+                .Append(product.Keyword).Append(' ')
+                .Append(product.Reason).Append(' ')
+                .Append(product.ShopName);
+
+            foreach (KeyValuePair<string, string> pair in product.Attributes)
+            {
+                builder.Append(' ').Append(pair.Key).Append(' ').Append(pair.Value);
+            }
+
+            string text = builder.ToString().ToLowerInvariant();
+            string[] restrictedTerms = new string[]
+            {
+                "轮椅", "助行", "拐杖", "康复", "护理床", "病床", "矫形", "残疾", "残障",
+                "医疗", "医用", "药品", "药物", "保健", "wheelchair", "walker", "crutch",
+                "rehabilitation", "orthopedic", "disabled", "invalid", "medical", "medicine",
+                "инвалид", "коляск", "медицин",
+                "杀虫", "杀虫剂", "除虫", "灭虫", "驱虫", "农药", "气雾剂", "insecticide", "pesticide", "repellent",
+                "инсектицид", "пестицид", "аэрозоль", "яд"
+            };
+
+            for (int i = 0; i < restrictedTerms.Length; i++)
+            {
+                if (text.IndexOf(restrictedTerms[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private async Task<SourcingResult> Collect1688CandidatesFromBrowser(IList<SourcingSeed> seeds, AppConfig config, SourcingOptions options)
@@ -1683,9 +1943,17 @@ namespace LitchiOzonRecovery
                 }
 
                 AppendAutomationLog("Search 1688 in browser: " + seed.Keyword);
-                string url = "https://s.1688.com/selloffer/offer_search.htm?keywords=" + Uri.EscapeDataString(seed.Keyword);
-                await NavigateAndWait(url, 6500);
+                string url = "https://s.1688.com/selloffer/offer_search.htm?keywords=" + Encode1688Keyword(seed.Keyword);
+                await NavigateAndWait(url, 1500);
+                bool rendered = await WaitForSearchResults(seed.Keyword, 35000);
+                result.Logs.Add(seed.Keyword + " render wait: " + (rendered ? "ready" : "timeout"));
                 List<SourceProduct> cards = await ScrapeSearchPage(seed.Keyword, perKeywordLimit);
+                if (cards.Count == 0)
+                {
+                    AppendAutomationLog("Search cards not ready, retrying after extra wait: " + seed.Keyword);
+                    await Task.Delay(8000);
+                    cards = await ScrapeSearchPage(seed.Keyword, perKeywordLimit);
+                }
                 result.Logs.Add(seed.Keyword + " search cards: " + cards.Count);
 
                 for (int j = 0; j < cards.Count; j++)
@@ -1746,6 +2014,38 @@ namespace LitchiOzonRecovery
             }
 
             await Task.Delay(waitAfterMs);
+        }
+
+        private async Task<bool> WaitForSearchResults(string keyword, int timeoutMs)
+        {
+            DateTime deadline = DateTime.Now.AddMilliseconds(timeoutMs <= 0 ? 30000 : timeoutMs);
+            string script = @"
+(function(){
+  var links = document.querySelectorAll('a[href*=""offer""], a[href*=""detail.1688.com""]');
+  if (links && links.length > 0) return true;
+  return /offer\/\d+\.html|offerId=\d+|object_id=\d+/.test(document.body ? document.body.innerHTML : '');
+})();";
+
+            while (DateTime.Now < deadline)
+            {
+                ThrowIfCurrentProcessStopped();
+                try
+                {
+                    string value = await _browser.CoreWebView2.ExecuteScriptAsync(script);
+                    if (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+
+                AppendAutomationLog("Waiting 1688 render: " + keyword);
+                await Task.Delay(1000);
+            }
+
+            return false;
         }
 
         private async Task<List<SourceProduct>> ScrapeSearchPage(string keyword, int limit)
@@ -1811,16 +2111,40 @@ namespace LitchiOzonRecovery
   var salesMatch = body.match(/([0-9.]+)\s*(万)?\s*(?:人付款|成交|已售|销量)/);
   var sales = 0;
   if(salesMatch){ sales = parseFloat(salesMatch[1] || '0') || 0; if(salesMatch[2]) sales *= 10000; }
-  var imgs = Array.prototype.slice.call(document.querySelectorAll('img'))
-    .map(function(img){ return abs(img.currentSrc || img.src || attr(img,'data-src')); })
-    .filter(function(url){ return /alicdn|cbu|1688/i.test(url) && !/avatar|logo|icon/i.test(url); });
+  function bestImg(node){
+    var srcset = attr(node,'srcset');
+    if(srcset){
+      var first = srcset.split(',')[0].trim().split(' ')[0];
+      if(first) return abs(first);
+    }
+    return abs(node.currentSrc || node.src || attr(node,'data-src') || attr(node,'data-lazy-src') || attr(node,'data-ks-lazyload') || attr(node,'data-img-url'));
+  }
+  var imgs = Array.prototype.slice.call(document.querySelectorAll('img, source'))
+    .map(function(img){ return bestImg(img); })
+    .filter(function(url){ return /alicdn|cbu|1688/i.test(url) && !/avatar|logo|icon|lazyload/i.test(url); });
   var unique = [];
   imgs.forEach(function(url){ if(url && unique.indexOf(url) < 0) unique.push(url.split('?')[0]); });
   var attrs = {};
-  Array.prototype.slice.call(document.querySelectorAll('tr, li, dl, .offer-attr, .mod-detail-attributes')).slice(0,80).forEach(function(row){
+  function addAttr(k, v){
+    k = (k || '').replace(/[：:]+$/,'').trim();
+    v = (v || '').trim();
+    if(!k || !v || k.length > 30 || v.length > 120) return;
+    if(Object.keys(attrs).length >= 40) return;
+    if(!attrs[k]) attrs[k] = v;
+  }
+  Array.prototype.slice.call(document.querySelectorAll('tr')).forEach(function(row){
+    var cells = row.querySelectorAll('th,td');
+    if(cells.length >= 2){
+      addAttr(text(cells[0]), text(cells[cells.length - 1]));
+    }
+  });
+  Array.prototype.slice.call(document.querySelectorAll('dl')).forEach(function(row){
+    addAttr(text(row.querySelector('dt')), text(row.querySelector('dd')));
+  });
+  Array.prototype.slice.call(document.querySelectorAll('li, .offer-attr, .mod-detail-attributes')).slice(0,120).forEach(function(row){
     var t = text(row);
-    var m = t.match(/^(.{2,20})[:：]\s*(.{1,80})$/);
-    if(m && Object.keys(attrs).length < 20) attrs[m[1]] = m[2];
+    var m = t.match(/^(.{1,30})[:：]\s*(.{1,120})$/);
+    if(m) addAttr(m[1], m[2]);
   });
   return {
     OfferId:offerId(location.href),
@@ -1929,10 +2253,175 @@ namespace LitchiOzonRecovery
             if (!string.IsNullOrEmpty(product.MainImage) || product.Images.Count > 0) score += 20m; else reasons.Add("missing image");
             if (product.Attributes.Count > 0) score += Math.Min(15m, product.Attributes.Count * 2m);
             if (!string.IsNullOrEmpty(product.ShopName)) score += 10m;
+            int relevance = ComputeKeywordRelevance(product);
+            if (relevance >= 55)
+            {
+                score += 20m;
+            }
+            else if (relevance >= 35)
+            {
+                score += 10m;
+            }
+            else
+            {
+                reasons.Add("weak keyword relevance");
+            }
+
             if (config != null && config.MinSaleNum > 0 && product.SalesCount > 0 && product.SalesCount < config.MinSaleNum) reasons.Add("sales below config");
+            if (IsComplianceRestrictedProduct(product)) reasons.Add("restricted compliance category");
             product.Score = Math.Round(score, 2);
             product.Decision = reasons.Count == 0 && score >= 45m ? "Go" : (score >= 30m ? "Watch" : "No-Go");
             product.Reason = reasons.Count == 0 ? "browser scrape signals look usable" : string.Join("; ", reasons.ToArray());
+        }
+
+        private static bool IsStrongKeywordMatch(SourceProduct product)
+        {
+            return ComputeKeywordRelevance(product) >= 35;
+        }
+
+        private static int ComputeKeywordRelevance(SourceProduct product)
+        {
+            if (product == null)
+            {
+                return 0;
+            }
+
+            string keyword = Convert.ToString(product.Keyword ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(keyword))
+            {
+                return 100;
+            }
+
+            string haystack = BuildKeywordHaystack(product);
+            string normalizedHaystack = NormalizeKeywordText(haystack);
+            string normalizedTitle = NormalizeKeywordText(product.Title);
+            string normalizedKeyword = NormalizeKeywordText(keyword);
+            if (string.IsNullOrEmpty(normalizedHaystack) || string.IsNullOrEmpty(normalizedKeyword))
+            {
+                return 0;
+            }
+
+            int score = 0;
+            if (normalizedTitle.IndexOf(normalizedKeyword, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                score += 60;
+            }
+            else if (normalizedHaystack.IndexOf(normalizedKeyword, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                score += 45;
+            }
+
+            List<string> tokens = BuildKeywordTokens(keyword);
+            for (int i = 0; i < tokens.Count; i++)
+            {
+                string token = tokens[i];
+                string normalizedToken = NormalizeKeywordText(token);
+                if (string.IsNullOrEmpty(normalizedToken))
+                {
+                    continue;
+                }
+
+                if (normalizedTitle.IndexOf(normalizedToken, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    score += normalizedToken.Length >= 4 ? 18 : 12;
+                }
+                else if (normalizedHaystack.IndexOf(normalizedToken, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    score += normalizedToken.Length >= 4 ? 10 : 6;
+                }
+            }
+
+            return Math.Min(100, score);
+        }
+
+        private static string BuildKeywordHaystack(SourceProduct product)
+        {
+            StringBuilder builder = new StringBuilder();
+            builder.Append(product.Title).Append(' ')
+                .Append(product.Keyword).Append(' ')
+                .Append(product.ShopName).Append(' ');
+
+            foreach (KeyValuePair<string, string> pair in product.Attributes)
+            {
+                builder.Append(pair.Key).Append(' ').Append(pair.Value).Append(' ');
+            }
+
+            return builder.ToString();
+        }
+
+        private static List<string> BuildKeywordTokens(string keyword)
+        {
+            List<string> tokens = new List<string>();
+            Dictionary<string, bool> unique = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            string[] pieces = (keyword ?? string.Empty)
+                .Replace("/", " ")
+                .Replace("\\", " ")
+                .Replace(",", " ")
+                .Replace("，", " ")
+                .Replace("|", " ")
+                .Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+            for (int i = 0; i < pieces.Length; i++)
+            {
+                string piece = pieces[i].Trim();
+                AddKeywordToken(tokens, unique, piece);
+                if (ContainsChinese(piece) && piece.Length >= 4)
+                {
+                    for (int j = 0; j <= piece.Length - 2; j++)
+                    {
+                        AddKeywordToken(tokens, unique, piece.Substring(j, 2));
+                    }
+                }
+            }
+
+            return tokens;
+        }
+
+        private static void AddKeywordToken(List<string> tokens, Dictionary<string, bool> unique, string token)
+        {
+            string normalized = NormalizeKeywordText(token);
+            if (string.IsNullOrEmpty(normalized) || normalized.Length < 2 || unique.ContainsKey(normalized))
+            {
+                return;
+            }
+
+            unique[normalized] = true;
+            tokens.Add(token);
+        }
+
+        private static string NormalizeKeywordText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new StringBuilder(value.Length);
+            string lowered = value.Trim().ToLowerInvariant();
+            for (int i = 0; i < lowered.Length; i++)
+            {
+                char c = lowered[i];
+                if (char.IsLetterOrDigit(c) || (c >= 0x4E00 && c <= 0x9FFF))
+                {
+                    builder.Append(c);
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private static bool ContainsChinese(string value)
+        {
+            for (int i = 0; !string.IsNullOrEmpty(value) && i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c >= 0x4E00 && c <= 0x9FFF)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private int BrowserDecisionRank(string decision)
@@ -1957,6 +2446,35 @@ namespace LitchiOzonRecovery
         private static string EscapeJavaScript(string value)
         {
             return (value ?? string.Empty).Replace("\\", "\\\\").Replace("'", "\\'");
+        }
+
+        private static string Encode1688Keyword(string value)
+        {
+            byte[] bytes = Encoding.GetEncoding("GB18030").GetBytes(value ?? string.Empty);
+            StringBuilder builder = new StringBuilder(bytes.Length * 3);
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                byte b = bytes[i];
+                bool keep = (b >= (byte)'A' && b <= (byte)'Z') ||
+                    (b >= (byte)'a' && b <= (byte)'z') ||
+                    (b >= (byte)'0' && b <= (byte)'9') ||
+                    b == (byte)'-' || b == (byte)'_' || b == (byte)'.' || b == (byte)'~';
+                if (keep)
+                {
+                    builder.Append((char)b);
+                }
+                else if (b == (byte)' ')
+                {
+                    builder.Append("%20");
+                }
+                else
+                {
+                    builder.Append('%');
+                    builder.Append(b.ToString("X2"));
+                }
+            }
+
+            return builder.ToString();
         }
 
         private async void UploadSelectedToOzon(object sender, EventArgs e)
@@ -1999,6 +2517,47 @@ namespace LitchiOzonRecovery
                         10000));
 
                     AppendAutomationLog("Ozon import result: " + importResult.ImportSummary);
+                    importResult = await RetryFailedOzonImportsOnce(selected, options, importResult, _ozonClientIdBox.Text.Trim(), _ozonApiKeyBox.Text.Trim(), delegate(string line)
+                    {
+                        AppendAutomationLog(line);
+                    });
+                    if (importResult.AcceptedOfferIds.Count > 0)
+                    {
+                        if (!importResult.Success)
+                        {
+                            AppendAutomationLog("Ozon import had partial failures; continuing stock update for accepted offers.");
+                        }
+
+                        try
+                        {
+                            AppendAutomationLog("Waiting for Ozon SKU creation...");
+                            OzonSkuWaitResult skuResult = await Task.Run(() => _automationService.WaitForOzonSkuCreation(
+                                importResult.AcceptedOfferIds,
+                                _ozonClientIdBox.Text.Trim(),
+                                _ozonApiKeyBox.Text.Trim(),
+                                20,
+                                30000));
+                            AppendAutomationLog(skuResult.Summary);
+
+                            if (skuResult.ReadyOfferIds.Count == 0)
+                            {
+                                AppendAutomationLog("Ozon SKU creation is still pending; stock update skipped until SKU exists.");
+                            }
+                            else
+                            {
+                            string stockResponse = await Task.Run(() => _automationService.SetOzonStockTo100(
+                                skuResult.ReadyOfferIds,
+                                _ozonClientIdBox.Text.Trim(),
+                                _ozonApiKeyBox.Text.Trim()));
+                            AppendAutomationLog("Ozon stock set to 100: " + stockResponse);
+                            }
+                        }
+                        catch (Exception stockEx)
+                        {
+                            AppendAutomationLog("Ozon stock update failed: " + stockEx.Message);
+                        }
+                    }
+
                     if (!importResult.Success)
                     {
                         SetStatus("Ozon import returned errors. See automation log.");
@@ -2013,27 +2572,6 @@ namespace LitchiOzonRecovery
                 AppendAutomationLog("OZON ERROR: " + ex.Message);
                 MessageBox.Show(this, ex.ToString(), "Ozon upload failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 SetStatus("Ozon upload failed: " + ex.Message);
-            }
-        }
-
-        private void CheckOzonTask(object sender, EventArgs e)
-        {
-            string taskId = PromptDialog.Show(this, "Ozon task", "Input task_id:", Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty);
-            if (string.IsNullOrEmpty(taskId))
-            {
-                return;
-            }
-
-            try
-            {
-                string response = _automationService.GetOzonImportInfo(taskId.Trim(), _ozonClientIdBox.Text.Trim(), _ozonApiKeyBox.Text.Trim());
-                AppendAutomationLog("Ozon task info: " + response);
-                SetStatus("Ozon task info loaded.");
-            }
-            catch (Exception ex)
-            {
-                AppendAutomationLog("OZON TASK ERROR: " + ex.Message);
-                MessageBox.Show(this, ex.ToString(), "Ozon task failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -2053,6 +2591,8 @@ namespace LitchiOzonRecovery
 
         private SourcingOptions ReadSourcingOptions()
         {
+            long categoryId = ParseLong(_autoCategoryIdBox.Text);
+            long typeId = ParseLong(_autoTypeIdBox.Text);
             return new SourcingOptions
             {
                 Provider = Convert.ToString(_autoProviderBox.SelectedItem),
@@ -2061,12 +2601,185 @@ namespace LitchiOzonRecovery
                 PerKeywordLimit = (int)ParseLong(_autoPerKeywordBox.Text),
                 DetailLimit = (int)ParseLong(_autoDetailLimitBox.Text),
                 RubPerCny = ParseDecimal(_autoRubRateBox.Text),
-                OzonCategoryId = ParseLong(_autoCategoryIdBox.Text),
-                OzonTypeId = ParseLong(_autoTypeIdBox.Text),
+                OzonCategoryId = categoryId,
+                OzonTypeId = typeId,
+                OzonCategoryCandidateIds = BuildOzonCategoryCandidateIds(categoryId, typeId),
                 PriceMultiplier = ParseDecimal(_autoPriceMultiplierBox.Text),
-                CurrencyCode = "RUB",
-                Vat = "0"
+                MinOzonPrice = 0m,
+                CurrencyCode = "CNY",
+                Vat = "0",
+                Config = _snapshot == null ? null : _snapshot.Config,
+                FeeRules = _snapshot == null ? new List<FeeRule>() : _snapshot.FeeRules,
+                FulfillmentMode = _snapshot != null && _snapshot.Config != null && _snapshot.Config.IsFbo ? "FBO" : "FBS"
             };
+        }
+
+        private async Task<OzonImportResult> RetryFailedOzonImportsOnce(IList<SourceProduct> products, SourcingOptions options, OzonImportResult importResult, string clientId, string apiKey, Action<string> log)
+        {
+            if (importResult == null || string.IsNullOrEmpty(importResult.ImportInfoResponse))
+            {
+                return importResult;
+            }
+
+            List<SourceProduct> retryProducts;
+            string repairSummary = _automationService.PrepareRetryForFailedImports(products, options, importResult.ImportInfoResponse, clientId, apiKey, out retryProducts);
+            if (retryProducts == null || retryProducts.Count == 0)
+            {
+                return importResult;
+            }
+
+            if (log != null)
+            {
+                log("Ozon auto-repair prepared for failed items:");
+                if (!string.IsNullOrEmpty(repairSummary))
+                {
+                    string[] lines = repairSummary.Replace("\r", string.Empty).Split(new char[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        log("  " + lines[i]);
+                    }
+                }
+            }
+
+            OzonImportResult retrySubmit = _automationService.UploadToOzon(retryProducts, options, clientId, apiKey);
+            if (!retrySubmit.Success)
+            {
+                if (log != null)
+                {
+                    log("Ozon auto-repair retry submit failed: " + retrySubmit.ErrorMessage);
+                }
+
+                return importResult;
+            }
+
+            if (log != null)
+            {
+                log("Ozon auto-repair retry task submitted: " + retryProducts.Count + " items, task_id=" + SafeValue(retrySubmit.TaskId));
+            }
+
+            OzonImportResult retryImportResult = await Task.Run(() => _automationService.WaitForOzonImportInfo(
+                retrySubmit.TaskId,
+                clientId,
+                apiKey,
+                12,
+                10000));
+
+            if (log != null)
+            {
+                log("Ozon auto-repair retry result:");
+                log(retryImportResult.ImportSummary);
+            }
+
+            return MergeOzonImportResults(importResult, retryImportResult);
+        }
+
+        private static OzonImportResult MergeOzonImportResults(OzonImportResult original, OzonImportResult retry)
+        {
+            if (original == null)
+            {
+                return retry;
+            }
+
+            if (retry == null)
+            {
+                return original;
+            }
+
+            OzonImportResult merged = new OzonImportResult();
+            merged.Success = original.Success || retry.Success;
+            merged.TaskId = string.IsNullOrEmpty(retry.TaskId) ? original.TaskId : retry.TaskId;
+            merged.RawResponse = string.IsNullOrEmpty(retry.RawResponse) ? original.RawResponse : retry.RawResponse;
+            merged.ErrorMessage = string.IsNullOrEmpty(retry.ErrorMessage) ? original.ErrorMessage : retry.ErrorMessage;
+            merged.ImportInfoResponse = string.IsNullOrEmpty(retry.ImportInfoResponse) ? original.ImportInfoResponse : retry.ImportInfoResponse;
+            merged.ImportSummary = original.ImportSummary;
+            if (!string.IsNullOrEmpty(retry.ImportSummary))
+            {
+                merged.ImportSummary += Environment.NewLine + "Auto-repair retry:" + Environment.NewLine + retry.ImportSummary;
+            }
+
+            AppendUniqueOfferIds(merged.AcceptedOfferIds, original.AcceptedOfferIds);
+            AppendUniqueOfferIds(merged.AcceptedOfferIds, retry.AcceptedOfferIds);
+            return merged;
+        }
+
+        private static void AppendUniqueOfferIds(IList<string> target, IList<string> source)
+        {
+            if (target == null || source == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                string offerId = source[i];
+                if (string.IsNullOrEmpty(offerId) || target.Contains(offerId))
+                {
+                    continue;
+                }
+
+                target.Add(offerId);
+            }
+        }
+
+        private List<long> BuildOzonCategoryCandidateIds(long categoryId, long typeId)
+        {
+            List<long> candidates = new List<long>();
+            if (categoryId > 0)
+            {
+                candidates.Add(categoryId);
+            }
+
+            EnsureSnapshot();
+            AppendCategoryCandidatesByType(_snapshot == null ? null : _snapshot.Categories, typeId, candidates, new List<long>());
+            return candidates;
+        }
+
+        private void AppendCategoryCandidatesByType(IList<CategoryNode> nodes, long targetTypeId, IList<long> output, IList<long> ancestors)
+        {
+            for (int i = 0; nodes != null && i < nodes.Count; i++)
+            {
+                CategoryNode node = nodes[i];
+                if (node == null)
+                {
+                    continue;
+                }
+
+                List<long> nextAncestors = new List<long>(ancestors);
+                long nodeCategoryId = ParseLong(node.DescriptionCategoryId);
+                if (nodeCategoryId > 0 && !nextAncestors.Contains(nodeCategoryId))
+                {
+                    nextAncestors.Add(nodeCategoryId);
+                }
+
+                if (ParseLong(node.DescriptionTypeId) == targetTypeId)
+                {
+                    AppendUniqueLong(output, nodeCategoryId);
+                    for (int ancestorIndex = nextAncestors.Count - 1; ancestorIndex >= 0; ancestorIndex--)
+                    {
+                        AppendUniqueLong(output, nextAncestors[ancestorIndex]);
+                    }
+                }
+
+                AppendCategoryCandidatesByType(node.Children, targetTypeId, output, nextAncestors);
+            }
+        }
+
+        private static void AppendUniqueLong(IList<long> values, long value)
+        {
+            if (value <= 0 || values == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (values[i] == value)
+                {
+                    return;
+                }
+            }
+
+            values.Add(value);
         }
 
         private List<SourcingSeed> ReadSourcingSeeds()
@@ -2134,6 +2847,41 @@ namespace LitchiOzonRecovery
             }
 
             _autoLogBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + " " + line);
+        }
+
+        private string WriteExceptionLog(string stage, Exception ex, string reportSnapshot)
+        {
+            try
+            {
+                string logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(logDirectory);
+
+                string safeStage = string.IsNullOrEmpty(stage) ? "error" : stage.Replace(' ', '-');
+                string path = Path.Combine(logDirectory, DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + safeStage + ".log");
+
+                StringBuilder builder = new StringBuilder();
+                builder.AppendLine("Stage: " + safeStage);
+                builder.AppendLine("Time: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                builder.AppendLine();
+                builder.AppendLine("Exception");
+                builder.AppendLine("---------");
+                builder.AppendLine(ex == null ? "(null)" : ex.ToString());
+
+                if (!string.IsNullOrEmpty(reportSnapshot))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("Report Snapshot");
+                    builder.AppendLine("---------------");
+                    builder.AppendLine(reportSnapshot);
+                }
+
+                File.WriteAllText(path, builder.ToString(), new UTF8Encoding(false));
+                return path;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private void InitializeBrowser(object sender, EventArgs e)
@@ -2228,20 +2976,6 @@ namespace LitchiOzonRecovery
             }
         }
 
-        private void ClearDatabaseViews()
-        {
-            EnsureSnapshot();
-            _snapshot.TableCounts = new Dictionary<string, long>();
-            _snapshot.TableCounts["SkuTable"] = 0;
-            _snapshot.TableCounts["ShopTable"] = 0;
-            _snapshot.TableCounts["tb_catch_shop"] = 0;
-            _skuGrid.DataSource = null;
-            _shopGrid.DataSource = null;
-            _catchGrid.DataSource = null;
-            _dbSummaryLabel.Text = "数据库未加载：" + _databaseErrorMessage;
-            _dbBatchSummaryLabel.Text = "请先修复 SQLite 依赖，再继续导入或查看本地数据库。";
-        }
-
         private void ClearAssetViews()
         {
             EnsureSnapshot();
@@ -2251,16 +2985,6 @@ namespace LitchiOzonRecovery
             _feeGrid.DataSource = null;
         }
 
-        private long GetCount(string name)
-        {
-            if (_snapshot == null || _snapshot.TableCounts == null || !_snapshot.TableCounts.ContainsKey(name))
-            {
-                return 0;
-            }
-
-            return _snapshot.TableCounts[name];
-        }
-
         private FeeRule GetSelectedFeeRule()
         {
             if (_feeGrid.CurrentRow == null)
@@ -2268,15 +2992,21 @@ namespace LitchiOzonRecovery
                 return null;
             }
 
+            FeeRuleDisplayRow display = _feeGrid.CurrentRow.DataBoundItem as FeeRuleDisplayRow;
+            if (display != null)
+            {
+                return display.Rule;
+            }
+
             return _feeGrid.CurrentRow.DataBoundItem as FeeRule;
         }
 
         private TreeNode BuildTreeNode(CategoryNode source)
         {
-            string text = source.DescriptionCategoryName;
+            string text = BuildBilingualCategoryName(source.DescriptionCategoryName);
             if (!string.IsNullOrEmpty(source.DescriptionTypeName))
             {
-                text += " / " + source.DescriptionTypeName;
+                text += " / " + BuildBilingualCategoryName(source.DescriptionTypeName);
             }
 
             if (!string.IsNullOrEmpty(source.DescriptionCategoryId))
@@ -2298,7 +3028,7 @@ namespace LitchiOzonRecovery
         private TabPage CreateTabPage(string title)
         {
             TabPage tab = new TabPage(title);
-            tab.BackColor = Color.FromArgb(245, 247, 250);
+            tab.BackColor = ShellBack;
             return tab;
         }
 
@@ -2306,37 +3036,42 @@ namespace LitchiOzonRecovery
         {
             FlowLayoutPanel panel = new FlowLayoutPanel();
             panel.Dock = DockStyle.Top;
-            panel.Height = 56;
+            panel.Height = 68;
             panel.WrapContents = false;
             panel.AutoScroll = true;
-            panel.Padding = new Padding(12, 10, 12, 0);
-            panel.BackColor = Color.White;
+            panel.Padding = new Padding(26, 14, 16, 0);
+            panel.BackColor = ShellBack;
             return panel;
         }
 
         private Control CreateStatCard(string title, string value, string description, Color accent, out Label valueLabel)
         {
-            Panel card = new Panel();
+            RoundedPanel card = new RoundedPanel();
             card.Dock = DockStyle.Fill;
-            card.Margin = new Padding(8);
-            card.BackColor = Color.White;
-            card.Padding = new Padding(14, 12, 14, 12);
+            card.Margin = new Padding(10);
+            card.FillColor = CardBack;
+            card.BorderColor = LineWarm;
+            card.ShadowColor = Color.FromArgb(22, 116, 95, 62);
+            card.Radius = 26;
+            card.Padding = new Padding(16, 14, 16, 14);
 
             Panel line = new Panel();
             line.BackColor = accent;
             line.Width = 6;
             line.Dock = DockStyle.Left;
+            line.Margin = new Padding(0, 12, 0, 12);
 
             Label titleLabel = new Label();
             titleLabel.Text = title;
             titleLabel.AutoSize = true;
-            titleLabel.ForeColor = Color.FromArgb(96, 98, 102);
+            titleLabel.ForeColor = TextMuted;
             titleLabel.Location = new Point(18, 14);
 
             valueLabel = new Label();
             valueLabel.Text = value;
             valueLabel.AutoSize = true;
-            valueLabel.Font = new Font("Microsoft YaHei UI", 20F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            valueLabel.Font = new Font("Microsoft YaHei UI", 23F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            valueLabel.ForeColor = TextStrong;
             valueLabel.Location = new Point(18, 36);
 
             Label descriptionLabel = new Label();
@@ -2344,7 +3079,7 @@ namespace LitchiOzonRecovery
             descriptionLabel.AutoSize = false;
             descriptionLabel.Width = 240;
             descriptionLabel.Height = 36;
-            descriptionLabel.ForeColor = Color.FromArgb(144, 147, 153);
+            descriptionLabel.ForeColor = TextMuted;
             descriptionLabel.Location = new Point(18, 78);
 
             card.Controls.Add(descriptionLabel);
@@ -2356,13 +3091,30 @@ namespace LitchiOzonRecovery
 
         private static Control WrapWithGroup(string title, Control inner)
         {
-            GroupBox group = new GroupBox();
-            group.Text = title;
+            RoundedPanel group = new RoundedPanel();
             group.Dock = DockStyle.Fill;
-            group.Padding = new Padding(8, 24, 8, 8);
-            group.BackColor = Color.White;
+            group.Padding = new Padding(16, 42, 16, 16);
+            group.FillColor = CardBack;
+            group.BorderColor = LineWarm;
+            group.ShadowColor = Color.FromArgb(20, 95, 82, 58);
+            group.Radius = 28;
+
+            Label titleLabel = new Label();
+            titleLabel.Text = title;
+            titleLabel.AutoSize = true;
+            titleLabel.Left = 16;
+            titleLabel.Top = 12;
+            titleLabel.ForeColor = TextStrong;
+            titleLabel.Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point, 134);
+
+            Panel content = new Panel();
+            content.Dock = DockStyle.Fill;
+            content.BackColor = Color.FromArgb(255, 253, 248);
+            inner.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point, 134);
             inner.Dock = DockStyle.Fill;
-            group.Controls.Add(inner);
+            content.Controls.Add(inner);
+            group.Controls.Add(content);
+            group.Controls.Add(titleLabel);
             return group;
         }
 
@@ -2377,13 +3129,21 @@ namespace LitchiOzonRecovery
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
             grid.MultiSelect = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
-            grid.BackgroundColor = Color.White;
+            grid.BackgroundColor = Color.FromArgb(255, 253, 248);
             grid.BorderStyle = BorderStyle.None;
             grid.EnableHeadersVisualStyles = false;
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(247, 248, 250);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(48, 49, 51);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(236, 245, 255);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(48, 49, 51);
+            grid.RowTemplate.Height = 34;
+            grid.GridColor = Color.FromArgb(231, 223, 207);
+            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
+            grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(244, 239, 228);
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(64, 73, 82);
+            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            grid.DefaultCellStyle.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point, 134);
+            grid.DefaultCellStyle.BackColor = Color.FromArgb(255, 253, 248);
+            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(249, 246, 238);
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(219, 244, 235);
+            grid.DefaultCellStyle.SelectionForeColor = TextStrong;
             return grid;
         }
 
@@ -2391,14 +3151,50 @@ namespace LitchiOzonRecovery
         {
             Button button = new Button();
             button.Text = text;
-            button.AutoSize = true;
-            button.Height = 32;
-            button.Padding = new Padding(10, 4, 10, 4);
+            button.AutoSize = false;
+            button.Height = 38;
+            button.Width = Math.Max(104, Math.Min(188, text.Length * 14 + 34));
+            button.Margin = new Padding(5, 0, 7, 9);
+            button.Padding = new Padding(12, 5, 12, 5);
             button.FlatStyle = FlatStyle.Flat;
             button.FlatAppearance.BorderSize = 1;
-            button.FlatAppearance.BorderColor = primary ? Color.FromArgb(64, 158, 255) : Color.FromArgb(220, 223, 230);
-            button.BackColor = primary ? Color.FromArgb(64, 158, 255) : Color.White;
-            button.ForeColor = primary ? Color.White : Color.FromArgb(48, 49, 51);
+            button.Cursor = Cursors.Hand;
+            Color normalBack = primary ? PilotGreen : Color.FromArgb(252, 250, 244);
+            Color hoverBack = primary ? Color.FromArgb(19, 159, 116) : Color.FromArgb(232, 247, 240);
+            Color downBack = primary ? PilotGreenDark : Color.FromArgb(212, 237, 225);
+            Color normalBorder = primary ? PilotGreen : Color.FromArgb(222, 213, 195);
+            Color hoverBorder = primary ? Color.FromArgb(76, 190, 150) : Color.FromArgb(161, 207, 187);
+            button.FlatAppearance.BorderColor = normalBorder;
+            button.BackColor = normalBack;
+            button.ForeColor = primary ? Color.White : TextStrong;
+            button.FlatAppearance.MouseOverBackColor = hoverBack;
+            button.FlatAppearance.MouseDownBackColor = downBack;
+            button.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 134);
+            Padding normalMargin = button.Margin;
+            Padding pressedMargin = new Padding(normalMargin.Left, normalMargin.Top + 2, normalMargin.Right, Math.Max(0, normalMargin.Bottom - 2));
+            button.MouseEnter += delegate
+            {
+                button.BackColor = hoverBack;
+                button.FlatAppearance.BorderColor = hoverBorder;
+            };
+            button.MouseLeave += delegate
+            {
+                button.BackColor = normalBack;
+                button.FlatAppearance.BorderColor = normalBorder;
+                button.Margin = normalMargin;
+            };
+            button.MouseDown += delegate
+            {
+                button.BackColor = downBack;
+                button.Margin = pressedMargin;
+            };
+            button.MouseUp += delegate
+            {
+                button.BackColor = hoverBack;
+                button.Margin = normalMargin;
+            };
+            button.Resize += delegate { SetRoundedRegion(button, 18); };
+            SetRoundedRegion(button, 18);
             button.Click += handler;
             return button;
         }
@@ -2420,7 +3216,40 @@ namespace LitchiOzonRecovery
             textBox.Top = top;
             textBox.Width = width;
             textBox.Text = value;
+            textBox.BorderStyle = BorderStyle.FixedSingle;
+            textBox.BackColor = Color.FromArgb(255, 253, 248);
             return textBox;
+        }
+
+        private static void SetRoundedRegion(Control control, int radius)
+        {
+            if (control.Width <= 0 || control.Height <= 0)
+            {
+                return;
+            }
+
+            if (control.Region != null)
+            {
+                control.Region.Dispose();
+            }
+
+            control.Region = new Region(CreateRoundPath(new Rectangle(0, 0, control.Width, control.Height), radius));
+        }
+
+        private static GraphicsPath CreateRoundPath(Rectangle bounds, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int diameter = Math.Max(1, radius * 2);
+            Rectangle arc = new Rectangle(bounds.Location, new Size(diameter, diameter));
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         private decimal ParseDecimal(string text)
@@ -2435,6 +3264,383 @@ namespace LitchiOzonRecovery
             return long.TryParse(text, out value) ? value : 0L;
         }
 
+        private void LoadUiLanguagePreference()
+        {
+            try
+            {
+                AppConfig config = ConfigService.Load(_paths.ConfigFile);
+                _uiLanguage = NormalizeUiLanguage(config == null ? null : config.UiLanguage);
+            }
+            catch
+            {
+                _uiLanguage = "zh";
+            }
+        }
+
+        private static string NormalizeUiLanguage(string language)
+        {
+            string text = Convert.ToString(language ?? string.Empty).Trim().ToLowerInvariant();
+            if (text == "en" || text == "ru")
+            {
+                return text;
+            }
+
+            return "zh";
+        }
+
+        private int LanguageIndexFromCode(string language)
+        {
+            switch (NormalizeUiLanguage(language))
+            {
+                case "en":
+                    return 1;
+                case "ru":
+                    return 2;
+                default:
+                    return 0;
+            }
+        }
+
+        private string LanguageCodeFromIndex(int index)
+        {
+            switch (index)
+            {
+                case 1:
+                    return "en";
+                case 2:
+                    return "ru";
+                default:
+                    return "zh";
+            }
+        }
+
+        private Dictionary<string, string> CaptureUiState()
+        {
+            Dictionary<string, string> state = new Dictionary<string, string>();
+            state["tab"] = _mainTabs == null ? "0" : _mainTabs.SelectedIndex.ToString();
+            state["keywords"] = _autoKeywordsBox == null ? string.Empty : _autoKeywordsBox.Text;
+            state["categoryId"] = _autoCategoryIdBox == null ? string.Empty : _autoCategoryIdBox.Text;
+            state["typeId"] = _autoTypeIdBox == null ? string.Empty : _autoTypeIdBox.Text;
+            state["clientId"] = _ozonClientIdBox == null ? string.Empty : _ozonClientIdBox.Text;
+            state["apiKey"] = _ozonApiKeyBox == null ? string.Empty : _ozonApiKeyBox.Text;
+            state["loop"] = _autoLoopCountBox == null ? "1" : _autoLoopCountBox.Text;
+            state["browserUrl"] = _browserUrlBox == null ? string.Empty : _browserUrlBox.Text;
+            return state;
+        }
+
+        private void RestoreUiState(Dictionary<string, string> state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            if (_autoKeywordsBox != null && state.ContainsKey("keywords"))
+            {
+                _autoKeywordsBox.Text = state["keywords"];
+            }
+
+            if (_autoCategoryIdBox != null && state.ContainsKey("categoryId"))
+            {
+                _autoCategoryIdBox.Text = state["categoryId"];
+            }
+
+            if (_autoTypeIdBox != null && state.ContainsKey("typeId"))
+            {
+                _autoTypeIdBox.Text = state["typeId"];
+            }
+
+            if (_ozonClientIdBox != null && state.ContainsKey("clientId") && !string.IsNullOrWhiteSpace(state["clientId"]))
+            {
+                _ozonClientIdBox.Text = state["clientId"];
+            }
+
+            if (_ozonApiKeyBox != null && state.ContainsKey("apiKey") && !string.IsNullOrWhiteSpace(state["apiKey"]))
+            {
+                _ozonApiKeyBox.Text = state["apiKey"];
+            }
+
+            if (_autoLoopCountBox != null && state.ContainsKey("loop"))
+            {
+                _autoLoopCountBox.Text = state["loop"];
+            }
+
+            if (_browserUrlBox != null && state.ContainsKey("browserUrl") && !string.IsNullOrWhiteSpace(state["browserUrl"]))
+            {
+                _browserUrlBox.Text = state["browserUrl"];
+            }
+
+            if (_languageComboBox != null)
+            {
+                _languageComboBox.SelectedIndex = LanguageIndexFromCode(_uiLanguage);
+            }
+
+            int selectedTab = 0;
+            if (state.ContainsKey("tab"))
+            {
+                int.TryParse(state["tab"], out selectedTab);
+            }
+
+            if (_mainTabs != null && selectedTab >= 0 && selectedTab < _mainTabs.TabPages.Count)
+            {
+                _mainTabs.SelectedIndex = selectedTab;
+            }
+        }
+
+        private void ApplyLanguageSelection(object sender, EventArgs e)
+        {
+            string selected = LanguageCodeFromIndex(_languageComboBox == null ? 0 : _languageComboBox.SelectedIndex);
+            if (selected == _uiLanguage)
+            {
+                SetStatus(T("languageNoChange"));
+                return;
+            }
+
+            Dictionary<string, string> state = CaptureUiState();
+            _uiLanguage = selected;
+
+            AppConfig config = _snapshot == null ? ConfigService.Load(_paths.ConfigFile) : _snapshot.Config;
+            if (config == null)
+            {
+                config = AppConfig.CreateDefault();
+            }
+
+            config.UiLanguage = _uiLanguage;
+            ConfigService.Save(_paths.ConfigFile, config);
+
+            if (_browser != null)
+            {
+                try
+                {
+                    _browser.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            SuspendLayout();
+            Controls.Clear();
+            InitializeControls();
+            LoadAll();
+            ApplyOzonSellerDefaults();
+            RestoreUiState(state);
+            ResumeLayout();
+            PerformLayout();
+            SetStatus(T("languageApplied"));
+        }
+
+        private string T(string key)
+        {
+            switch (NormalizeUiLanguage(_uiLanguage))
+            {
+                case "en":
+                    switch (key)
+                    {
+                        case "subtitle": return "1688 sourcing to Ozon upload workspace";
+                        case "overview": return "Overview";
+                        case "config": return "Config Center";
+                        case "assets": return "Categories & Rules";
+                        case "language": return "Language";
+                        case "browser": return "Plugin Browser";
+                        case "reload": return "Reload";
+                        case "openBase": return "Open Assets";
+                        case "openPlugin": return "Open 1688 Plugin";
+                        case "runUpdater": return "Run Updater";
+                        case "brake": return "Emergency Stop";
+                        case "loopCount": return "Loop count";
+                        case "fullAuto": return "Full Auto Loop";
+                        case "categoryNodes": return "Category Nodes";
+                        case "categoryNodesDesc": return "Total nodes loaded from category.txt";
+                        case "feeRules": return "Fee Rules";
+                        case "feeRulesDesc": return "Total rules loaded from fee.txt";
+                        case "pluginFiles": return "Plugin Files";
+                        case "pluginFilesDesc": return "Files detected in the 1688 plugin folder";
+                        case "overviewDetails": return "Workspace Summary";
+                        case "resourcePaths": return "Resource Paths";
+                        case "workRoot": return "Workspace: ";
+                        case "baselineRoot": return "Baseline: ";
+                        case "configFile": return "Config file: ";
+                        case "plugin1688": return "1688 plugin: ";
+                        case "updaterPath": return "Updater: ";
+                        case "recoveryStatus": return "Recovery Status";
+                        case "categoryCountLine": return "Category nodes: ";
+                        case "feeCountLine": return "Fee rules: ";
+                        case "pluginCountLine": return "Plugin files: ";
+                        case "assetLoadFailed": return "Category/rule status: load failed";
+                        case "failureReason": return "Reason: ";
+                        case "currentFilters": return "Current Filters";
+                        case "saveDir": return "Save directory: ";
+                        case "priceRange": return "Price range: ";
+                        case "minProfit": return "Minimum profit: ";
+                        case "defaultShipping": return "Default shipping: ";
+                        case "enable1688": return "Enable 1688: ";
+                        case "autoExport": return "Auto export: ";
+                        case "cloudFilter": return "Cloud filter: ";
+                        case "yes": return "Yes";
+                        case "no": return "No";
+                        case "quickStart": return "Quick Start";
+                        case "quickGuide": return "1. Open Plugin Browser and sign in to 1688.\r\n2. Double-click a second-level category in Categories & Rules.\r\n3. Run Auto Sourcing. The browser will search 1688 with the Chinese keyword.\r\n4. Upload to Ozon and watch the SKU and stock brief on Overview.\r\n5. Keywords always stay in Chinese and are not translated.";
+                        case "reloadConfig": return "Reload Config";
+                        case "saveConfig": return "Save Config";
+                        case "initBrowser": return "Initialize Browser";
+                        case "openUrl": return "Open URL";
+                        case "filterConfig": return "Filter Config";
+                        case "reloadAssets": return "Reload Assets";
+                        case "exportFeeRules": return "Export Fee Rules";
+                        case "useRuleForAuto": return "Send Rule to Auto";
+                        case "searchAssets": return "Search categories/rules";
+                        case "categoryTree": return "Category Tree";
+                        case "feeRuleTable": return "Fee Rule Table";
+                        case "languageTitle": return "Interface Language";
+                        case "languageDesc": return "Switch the interface language here. The page text updates immediately after applying the new language.";
+                        case "languageCurrent": return "Current language";
+                        case "applyLanguage": return "Apply Language";
+                        case "languageNote": return "Keywords in Auto Sourcing always stay Chinese. This switch only changes the UI language.";
+                        case "languageApplied": return "Interface language updated.";
+                        case "languageNoChange": return "Interface language is already active.";
+                        case "ruleAppliedToAuto": return "Selected rule was sent to Auto Sourcing.";
+                        default: return key;
+                    }
+                case "ru":
+                    switch (key)
+                    {
+                        case "subtitle": return "Рабочее место для отбора 1688 и загрузки в Ozon";
+                        case "overview": return "Обзор";
+                        case "config": return "Настройки";
+                        case "assets": return "Категории и правила";
+                        case "language": return "Язык";
+                        case "browser": return "Браузер плагина";
+                        case "reload": return "Перезагрузить";
+                        case "openBase": return "Открыть ресурсы";
+                        case "openPlugin": return "Открыть плагин 1688";
+                        case "runUpdater": return "Запустить обновление";
+                        case "brake": return "Стоп";
+                        case "loopCount": return "Циклов";
+                        case "fullAuto": return "Полный автоцикл";
+                        case "categoryNodes": return "Категории";
+                        case "categoryNodesDesc": return "Всего узлов из category.txt";
+                        case "feeRules": return "Правила доставки";
+                        case "feeRulesDesc": return "Всего правил из fee.txt";
+                        case "pluginFiles": return "Файлы плагина";
+                        case "pluginFilesDesc": return "Файлы в папке плагина 1688";
+                        case "overviewDetails": return "Сводка рабочего места";
+                        case "resourcePaths": return "Пути ресурсов";
+                        case "workRoot": return "Рабочая папка: ";
+                        case "baselineRoot": return "Базовая папка: ";
+                        case "configFile": return "Файл настроек: ";
+                        case "plugin1688": return "Плагин 1688: ";
+                        case "updaterPath": return "Обновление: ";
+                        case "recoveryStatus": return "Статус восстановления";
+                        case "categoryCountLine": return "Категории: ";
+                        case "feeCountLine": return "Правила доставки: ";
+                        case "pluginCountLine": return "Файлы плагина: ";
+                        case "assetLoadFailed": return "Статус категорий/правил: ошибка загрузки";
+                        case "failureReason": return "Причина: ";
+                        case "currentFilters": return "Текущие фильтры";
+                        case "saveDir": return "Папка сохранения: ";
+                        case "priceRange": return "Диапазон цены: ";
+                        case "minProfit": return "Минимальная прибыль: ";
+                        case "defaultShipping": return "Доставка по умолчанию: ";
+                        case "enable1688": return "1688 включен: ";
+                        case "autoExport": return "Автоэкспорт: ";
+                        case "cloudFilter": return "Облачный фильтр: ";
+                        case "yes": return "Да";
+                        case "no": return "Нет";
+                        case "quickStart": return "Быстрый старт";
+                        case "quickGuide": return "1. Откройте браузер плагина и войдите в 1688.\r\n2. Дважды щёлкните подкатегорию в разделе категорий.\r\n3. Запустите Auto Sourcing. Браузер будет искать по китайскому ключевому слову.\r\n4. Загрузите товары в Ozon и следите за брифом SKU и остатков на обзоре.\r\n5. Ключевые слова в Auto Sourcing всегда остаются китайскими.";
+                        case "reloadConfig": return "Обновить настройки";
+                        case "saveConfig": return "Сохранить настройки";
+                        case "initBrowser": return "Запустить браузер";
+                        case "openUrl": return "Открыть сайт";
+                        case "filterConfig": return "Параметры фильтра";
+                        case "reloadAssets": return "Обновить ресурсы";
+                        case "exportFeeRules": return "Экспорт правил";
+                        case "useRuleForAuto": return "Передать правило в Auto";
+                        case "searchAssets": return "Поиск категорий/правил";
+                        case "categoryTree": return "Дерево категорий";
+                        case "feeRuleTable": return "Таблица правил";
+                        case "languageTitle": return "Язык интерфейса";
+                        case "languageDesc": return "Здесь можно переключать язык интерфейса. После применения текст страницы обновляется сразу.";
+                        case "languageCurrent": return "Текущий язык";
+                        case "applyLanguage": return "Применить язык";
+                        case "languageNote": return "Ключевые слова в Auto Sourcing всегда остаются на китайском. Переключатель меняет только интерфейс.";
+                        case "languageApplied": return "Язык интерфейса обновлён.";
+                        case "languageNoChange": return "Этот язык уже активен.";
+                        case "ruleAppliedToAuto": return "Выбранное правило передано в Auto Sourcing.";
+                        default: return key;
+                    }
+                default:
+                    switch (key)
+                    {
+                        case "subtitle": return "1688 自动选品到 Ozon 上架工作台";
+                        case "overview": return "总览";
+                        case "config": return "配置中心";
+                        case "assets": return "类目与规则";
+                        case "language": return "语言切换";
+                        case "browser": return "插件浏览器";
+                        case "reload": return "重新载入全部";
+                        case "openBase": return "打开基础资源";
+                        case "openPlugin": return "打开 1688 插件";
+                        case "runUpdater": return "运行更新器";
+                        case "brake": return "紧急刹车";
+                        case "loopCount": return "全自动循环次数";
+                        case "fullAuto": return "全链路自动循环";
+                        case "categoryNodes": return "类目节点";
+                        case "categoryNodesDesc": return "从 category.txt 读取到的类目树节点总数";
+                        case "feeRules": return "运费规则";
+                        case "feeRulesDesc": return "从 fee.txt 读取到的运费规则总数";
+                        case "pluginFiles": return "插件文件";
+                        case "pluginFilesDesc": return "1688 插件目录中的文件总数";
+                        case "overviewDetails": return "恢复资产明细";
+                        case "resourcePaths": return "资源路径";
+                        case "workRoot": return "工作区目录：";
+                        case "baselineRoot": return "基础目录：";
+                        case "configFile": return "配置文件：";
+                        case "plugin1688": return "1688 插件：";
+                        case "updaterPath": return "更新器程序：";
+                        case "recoveryStatus": return "恢复状态";
+                        case "categoryCountLine": return "类目节点：";
+                        case "feeCountLine": return "运费规则：";
+                        case "pluginCountLine": return "插件文件：";
+                        case "assetLoadFailed": return "类目/规则状态：加载失败";
+                        case "failureReason": return "失败原因：";
+                        case "currentFilters": return "当前筛选配置";
+                        case "saveDir": return "保存目录：";
+                        case "priceRange": return "售价范围：";
+                        case "minProfit": return "最低利润率：";
+                        case "defaultShipping": return "默认运费：";
+                        case "enable1688": return "启用 1688：";
+                        case "autoExport": return "自动导出：";
+                        case "cloudFilter": return "云筛选：";
+                        case "yes": return "是";
+                        case "no": return "否";
+                        case "quickStart": return "上手说明";
+                        case "quickGuide": return "1. 打开插件浏览器，先登录 1688，保持浏览器会话在线。\r\n2. 在类目与规则里双击一个二级类目，系统会把类目 ID、类型 ID 和中文关键词带入 Auto Sourcing。\r\n3. 在 Auto Sourcing 点 Run，程序会跳到插件浏览器搜索 1688，抓取商品、详情、价格、图片和属性。\r\n4. 点 Upload 或在总览页跑全链路循环，系统会生成俄文标题和文案，再按 Ozon Seller API 上传。\r\n5. SKU 创建和库存写入过程会实时回写到总览简报里，关键词始终保持中文。";
+                        case "reloadConfig": return "重新读取配置";
+                        case "saveConfig": return "保存当前配置";
+                        case "initBrowser": return "初始化插件浏览器";
+                        case "openUrl": return "打开网址";
+                        case "filterConfig": return "筛选配置";
+                        case "reloadAssets": return "重新读取资源";
+                        case "exportFeeRules": return "导出运费规则";
+                        case "useRuleForAuto": return "把规则带入 Auto";
+                        case "searchAssets": return "搜索类目/规则";
+                        case "categoryTree": return "类目树";
+                        case "feeRuleTable": return "运费规则表";
+                        case "languageTitle": return "界面语言";
+                        case "languageDesc": return "这里可以切换中文、英文、俄文三套界面。应用后会立即刷新当前窗口。";
+                        case "languageCurrent": return "当前界面语言";
+                        case "applyLanguage": return "应用语言";
+                        case "languageNote": return "注意：Auto Sourcing 里的关键词始终保持中文，不会被语言切换改成英文或俄文。";
+                        case "languageApplied": return "界面语言已切换。";
+                        case "languageNoChange": return "当前已经是这个界面语言。";
+                        case "ruleAppliedToAuto": return "已把选中规则带入 Auto Sourcing。";
+                        default: return key;
+                    }
+            }
+        }
+
         private string SafeValue(string text)
         {
             return string.IsNullOrEmpty(text) ? "未找到" : text;
@@ -2442,7 +3648,7 @@ namespace LitchiOzonRecovery
 
         private string YesNo(bool value)
         {
-            return value ? "是" : "否";
+            return value ? T("yes") : T("no");
         }
 
         private void SetStatus(string message)
@@ -2451,3 +3657,6 @@ namespace LitchiOzonRecovery
         }
     }
 }
+
+
+

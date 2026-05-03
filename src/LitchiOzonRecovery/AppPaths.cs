@@ -7,10 +7,12 @@ namespace LitchiOzonRecovery
     internal sealed class AppPaths
     {
         private readonly string _root;
+        private readonly string _baselineRoot;
 
-        private AppPaths(string root)
+        private AppPaths(string root, string baselineRoot)
         {
             _root = root;
+            _baselineRoot = baselineRoot;
         }
 
         public string WorkRoot
@@ -20,7 +22,7 @@ namespace LitchiOzonRecovery
 
         public string BaselineRoot
         {
-            get { return Path.Combine(_root, "baseline"); }
+            get { return _baselineRoot; }
         }
 
         public string ConfigFile
@@ -38,34 +40,9 @@ namespace LitchiOzonRecovery
             get { return Path.Combine(BaselineRoot, "fee.txt"); }
         }
 
-        public string DatabaseFile
-        {
-            get { return Path.Combine(BaselineRoot, "Data", "SkuDb.db"); }
-        }
-
         public string Plugin1688Folder
         {
             get { return Path.Combine(BaselineRoot, "Plugins", "1688"); }
-        }
-
-        public string OzonPlusRoot
-        {
-            get { return Path.Combine(_root, "ozon plus"); }
-        }
-
-        public string OzonPlusConfigFile
-        {
-            get { return Path.Combine(OzonPlusRoot, "config", "ozon-api.json"); }
-        }
-
-        public string OzonPlusOutputDirectory
-        {
-            get { return Path.Combine(OzonPlusRoot, "output"); }
-        }
-
-        public string OzonPlusKnowledgeBaseProductsDirectory
-        {
-            get { return Path.Combine(OzonPlusRoot, "knowledge-base", "products"); }
         }
 
         public string BrowserProfileFolder
@@ -108,40 +85,27 @@ namespace LitchiOzonRecovery
             }
         }
 
-        public string NativeInteropDirectory
-        {
-            get
-            {
-                string nativeFolder = Environment.Is64BitProcess ? "x64" : "x86";
-                string[] candidates = new string[]
-                {
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, nativeFolder),
-                    Path.Combine(_root, nativeFolder),
-                    Path.Combine(BaselineRoot, nativeFolder)
-                };
-
-                int i;
-                for (i = 0; i < candidates.Length; i++)
-                {
-                    if (File.Exists(Path.Combine(candidates[i], "SQLite.Interop.dll")))
-                    {
-                        return candidates[i];
-                    }
-                }
-
-                return null;
-            }
-        }
-
         public static AppPaths Discover()
         {
             string current = AppDomain.CurrentDomain.BaseDirectory;
 
             while (!string.IsNullOrEmpty(current))
             {
-                if (Directory.Exists(Path.Combine(current, "baseline")))
+                string nestedBaseline = Path.Combine(current, "baseline");
+                if (IsBaselineDirectory(nestedBaseline))
                 {
-                    return new AppPaths(current);
+                    return new AppPaths(current, nestedBaseline);
+                }
+
+                if (IsBaselineDirectory(current))
+                {
+                    return new AppPaths(current, current);
+                }
+
+                string distOzonPilot = Path.Combine(current, "dist", "OZON-PILOT");
+                if (IsBaselineDirectory(distOzonPilot))
+                {
+                    return new AppPaths(distOzonPilot, distOzonPilot);
                 }
 
                 DirectoryInfo parent = Directory.GetParent(current);
@@ -149,6 +113,19 @@ namespace LitchiOzonRecovery
             }
 
             throw new DirectoryNotFoundException("Unable to locate the baseline directory.");
+        }
+
+        private static bool IsBaselineDirectory(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
+            {
+                return false;
+            }
+
+            return File.Exists(Path.Combine(path, "SettingConfig.txt")) &&
+                   File.Exists(Path.Combine(path, "category.txt")) &&
+                   File.Exists(Path.Combine(path, "fee.txt")) &&
+                   Directory.Exists(Path.Combine(path, "Plugins", "1688"));
         }
 
         public string FindUpdaterExecutable()

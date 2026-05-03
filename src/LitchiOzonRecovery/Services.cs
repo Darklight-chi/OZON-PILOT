@@ -1,11 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Data;
-using System.Data.SQLite;
-using System.Diagnostics;
 using System.IO;
 using System.Text;
-using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -25,13 +21,45 @@ namespace LitchiOzonRecovery
 
             string json = TextFileReader.ReadAllText(path);
             AppConfig config = JsonConvert.DeserializeObject<AppConfig>(json);
-            return config ?? AppConfig.CreateDefault();
+            return Normalize(config);
         }
 
         public static void Save(string path, AppConfig config)
         {
             string json = JsonConvert.SerializeObject(config, Formatting.Indented);
             File.WriteAllText(path, json, new UTF8Encoding(false));
+        }
+
+        private static AppConfig Normalize(AppConfig config)
+        {
+            AppConfig safe = config ?? AppConfig.CreateDefault();
+            AppConfig defaults = AppConfig.CreateDefault();
+            if (safe.PlatformCommissionPercent <= 0)
+            {
+                safe.PlatformCommissionPercent = defaults.PlatformCommissionPercent;
+            }
+
+            if (safe.PromotionExpensePercent <= 0)
+            {
+                safe.PromotionExpensePercent = defaults.PromotionExpensePercent;
+            }
+
+            if (safe.TargetProfitPercent <= 0)
+            {
+                safe.TargetProfitPercent = defaults.TargetProfitPercent;
+            }
+
+            if (safe.BlackShops == null)
+            {
+                safe.BlackShops = new List<string>();
+            }
+
+            if (safe.FilterCategoryIds == null)
+            {
+                safe.FilterCategoryIds = new List<long>();
+            }
+
+            return safe;
         }
     }
 
@@ -66,6 +94,61 @@ namespace LitchiOzonRecovery
 
             return Encoding.Default.GetString(bytes);
         }
+
+        public static string RepairMojibake(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value ?? string.Empty;
+            }
+
+            string text = value.Trim();
+            if (string.IsNullOrEmpty(text))
+            {
+                return value;
+            }
+
+            try
+            {
+                byte[] originalBytes = Encoding.GetEncoding("GB18030").GetBytes(text);
+                string repaired = new UTF8Encoding(false, true).GetString(originalBytes);
+                if (!string.IsNullOrEmpty(repaired) && MojibakeScore(repaired) < MojibakeScore(text))
+                {
+                    return repaired;
+                }
+            }
+            catch
+            {
+            }
+
+            return value;
+        }
+
+        private static int MojibakeScore(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            int score = 0;
+            string markers = "锛鐨绫鏈鏂鏃鏉杩閫浠傜洰彔嶈�";
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+                if (ch == '\uFFFD' || (ch >= '\uE000' && ch <= '\uF8FF'))
+                {
+                    score += 5;
+                }
+
+                if (markers.IndexOf(ch) >= 0)
+                {
+                    score += 2;
+                }
+            }
+
+            return score;
+        }
     }
 
     internal static class AssetCatalogService
@@ -85,7 +168,11 @@ namespace LitchiOzonRecovery
                 JObject nodeObject = property.Value as JObject;
                 if (nodeObject != null)
                 {
-                    list.Add(ParseCategoryNode(nodeObject));
+                    CategoryNode node = ParseCategoryNode(nodeObject, string.Empty);
+                    if (!IsBlockedCategory(node))
+                    {
+                        list.Add(node);
+                    }
                 }
             }
 
@@ -96,6 +183,15 @@ namespace LitchiOzonRecovery
         {
             JArray array = JArray.Parse(TextFileReader.ReadAllText(path));
             List<FeeRule> rules = array.ToObject<List<FeeRule>>();
+            if (rules != null)
+            {
+                for (int i = 0; i < rules.Count; i++)
+                {
+                    rules[i].Category1 = TextFileReader.RepairMojibake(rules[i].Category1);
+                    rules[i].Category2 = TextFileReader.RepairMojibake(rules[i].Category2);
+                }
+            }
+
             return rules ?? new List<FeeRule>();
         }
 
@@ -161,25 +257,70 @@ namespace LitchiOzonRecovery
 
         public static FeeRule FindBestFeeRule(IList<FeeRule> rules, long categoryId1, long categoryId2)
         {
-            FeeRule byCategory2 = null;
-            FeeRule byCategory1 = null;
-            int i;
-            for (i = 0; i < rules.Count; i++)
-            {
-                FeeRule rule = rules[i];
-                if (categoryId2 > 0 && rule.CategoryId2 == categoryId2)
-                {
-                    byCategory2 = rule;
-                    break;
-                }
+            return FindBestFeeRule(rules, null, categoryId1, categoryId2);
+        }
 
-                if (categoryId1 > 0 && rule.CategoryId1 == categoryId1 && byCategory1 == null)
+        public static FeeRule FindBestFeeRule(IList<FeeRule> rules, IList<long> categoryCandidateIds, long categoryId1, long categoryId2)
+        {
+            if (rules == null || rules.Count == 0)
+            {
+                return null;
+            }
+
+            List<long> candidates = new List<long>();
+            AppendUniqueCategoryCandidate(candidates, categoryId2);
+            for (int i = 0; categoryCandidateIds != null && i < categoryCandidateIds.Count; i++)
+            {
+                AppendUniqueCategoryCandidate(candidates, categoryCandidateIds[i]);
+            }
+
+            AppendUniqueCategoryCandidate(candidates, categoryId1);
+
+            for (int candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+            {
+                long candidate = candidates[candidateIndex];
+                for (int i = 0; i < rules.Count; i++)
                 {
-                    byCategory1 = rule;
+                    FeeRule rule = rules[i];
+                    if (rule != null && candidate > 0 && rule.CategoryId2 == candidate)
+                    {
+                        return rule;
+                    }
                 }
             }
 
-            return byCategory2 ?? byCategory1;
+            for (int candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+            {
+                long candidate = candidates[candidateIndex];
+                for (int i = 0; i < rules.Count; i++)
+                {
+                    FeeRule rule = rules[i];
+                    if (rule != null && candidate > 0 && rule.CategoryId1 == candidate)
+                    {
+                        return rule;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static void AppendUniqueCategoryCandidate(IList<long> values, long value)
+        {
+            if (values == null || value <= 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (values[i] == value)
+                {
+                    return;
+                }
+            }
+
+            values.Add(value);
         }
 
         public static void ExportFeeRulesToExcel(IList<FeeRule> rules, string path)
@@ -226,14 +367,21 @@ namespace LitchiOzonRecovery
             }
         }
 
-        private static CategoryNode ParseCategoryNode(JObject obj)
+        private static CategoryNode ParseCategoryNode(JObject obj, string parentCategoryId)
         {
             CategoryNode node = new CategoryNode();
             node.DescriptionCategoryId = GetString(obj, "descriptionCategoryId");
-            node.DescriptionCategoryName = GetString(obj, "descriptionCategoryName");
+            string inheritedCategoryId = !string.IsNullOrEmpty(parentCategoryId) && parentCategoryId != "0"
+                ? parentCategoryId
+                : node.DescriptionCategoryId;
+            node.DescriptionCategoryName = TextFileReader.RepairMojibake(GetString(obj, "descriptionCategoryName"));
             node.DescriptionTypeId = GetString(obj, "descriptionTypeId");
-            node.DescriptionTypeName = GetString(obj, "descriptionTypeName");
+            node.DescriptionTypeName = TextFileReader.RepairMojibake(GetString(obj, "descriptionTypeName"));
             node.Disabled = GetBoolean(obj, "disabled");
+            bool hasUploadType = !string.IsNullOrEmpty(node.DescriptionTypeId) && node.DescriptionTypeId != "0";
+            node.UploadCategoryId = hasUploadType && !string.IsNullOrEmpty(parentCategoryId) && parentCategoryId != "0"
+                ? parentCategoryId
+                : node.DescriptionCategoryId;
 
             JObject childObject = obj["nodes"] as JObject;
             if (childObject != null)
@@ -243,12 +391,59 @@ namespace LitchiOzonRecovery
                     JObject next = property.Value as JObject;
                     if (next != null)
                     {
-                        node.Children.Add(ParseCategoryNode(next));
+                        CategoryNode child = ParseCategoryNode(next, inheritedCategoryId);
+                        if (!IsBlockedCategory(child))
+                        {
+                            node.Children.Add(child);
+                        }
                     }
                 }
             }
 
             return node;
+        }
+
+        private static bool IsBlockedCategory(CategoryNode node)
+        {
+            if (node == null)
+            {
+                return false;
+            }
+
+            string text = ((node.DescriptionCategoryName ?? string.Empty) + " " + (node.DescriptionTypeName ?? string.Empty)).ToLowerInvariant();
+            string[] complianceBlockedTerms = new string[]
+            {
+                "食品", "食物", "饮料", "酒", "药品", "药物", "医药", "医疗", "保健", "保健品",
+                "康复", "护理", "轮椅", "助行", "拐杖", "病床", "矫形", "残疾", "残障",
+                "古董", "收藏品", "food", "drink", "alcohol", "medicine", "medical", "pharmacy",
+                "healthcare", "rehabilitation", "wheelchair", "walker", "crutch", "orthopedic",
+                "disabled", "antique", "collectible", "антиквариат", "коллекция", "медицина"
+            };
+
+            for (int i = 0; i < complianceBlockedTerms.Length; i++)
+            {
+                if (text.IndexOf(complianceBlockedTerms[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return text.IndexOf("食品", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("食物", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("饮料", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("酒", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("药品", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("药物", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("医药", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("保健品", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("古董", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("收藏品", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("антиквариат", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("коллекцион", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("food", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("medicine", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("pharmacy", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("antique", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("collectible", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static CategoryNode FilterCategoryNode(CategoryNode node, string keyword)
@@ -301,283 +496,86 @@ namespace LitchiOzonRecovery
         }
     }
 
-    internal sealed class DatabaseService
-    {
-        private readonly string _dbPath;
-
-        public DatabaseService(string dbPath)
-        {
-            _dbPath = dbPath;
-        }
-
-        public Dictionary<string, long> GetTableCounts()
-        {
-            Dictionary<string, long> result = new Dictionary<string, long>();
-            string[] names = new string[] { "SkuTable", "ShopTable", "tb_catch_shop" };
-            int i;
-            for (i = 0; i < names.Length; i++)
-            {
-                result[names[i]] = ExecuteCount(names[i]);
-            }
-
-            return result;
-        }
-
-        public DataTable GetPreview(string tableName, int limit)
-        {
-            using (SQLiteConnection connection = OpenConnection())
-            using (SQLiteCommand command = connection.CreateCommand())
-            {
-                command.CommandText = "select * from " + tableName + " order by Id desc limit " + limit;
-                using (SQLiteDataAdapter adapter = new SQLiteDataAdapter(command))
-                {
-                    DataTable table = new DataTable();
-                    adapter.Fill(table);
-                    return table;
-                }
-            }
-        }
-
-        public List<string> GetAllIds(string tableName)
-        {
-            List<string> ids = new List<string>();
-            string column = GetIdColumnName(tableName);
-
-            using (SQLiteConnection connection = OpenConnection())
-            using (SQLiteCommand command = connection.CreateCommand())
-            {
-                command.CommandText = "select " + column + " from " + tableName + " order by Id";
-                using (SQLiteDataReader reader = command.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        ids.Add(Convert.ToString(reader[0]));
-                    }
-                }
-            }
-
-            return ids;
-        }
-
-        public int AppendIds(string tableName, IList<string> ids)
-        {
-            return SaveIds(tableName, ids, false);
-        }
-
-        public int ReplaceIds(string tableName, IList<string> ids)
-        {
-            return SaveIds(tableName, ids, true);
-        }
-
-        private int SaveIds(string tableName, IList<string> ids, bool replaceAll)
-        {
-            string column = GetIdColumnName(tableName);
-            int inserted = 0;
-
-            using (SQLiteConnection connection = OpenConnection())
-            using (SQLiteTransaction transaction = connection.BeginTransaction())
-            {
-                if (replaceAll)
-                {
-                    using (SQLiteCommand delete = connection.CreateCommand())
-                    {
-                        delete.CommandText = "delete from " + tableName;
-                        delete.Transaction = transaction;
-                        delete.ExecuteNonQuery();
-                    }
-                }
-
-                int i;
-                for (i = 0; i < ids.Count; i++)
-                {
-                    string value = NormalizeId(ids[i]);
-                    if (string.IsNullOrEmpty(value))
-                    {
-                        continue;
-                    }
-
-                    using (SQLiteCommand insert = connection.CreateCommand())
-                    {
-                        insert.Transaction = transaction;
-                        insert.CommandText = "insert or ignore into " + tableName + " (" + column + ") values (@value)";
-                        insert.Parameters.AddWithValue("@value", value);
-                        inserted += insert.ExecuteNonQuery();
-                    }
-                }
-
-                transaction.Commit();
-            }
-
-            return inserted;
-        }
-
-        private long ExecuteCount(string tableName)
-        {
-            using (SQLiteConnection connection = OpenConnection())
-            using (SQLiteCommand command = connection.CreateCommand())
-            {
-                command.CommandText = "select count(1) from " + tableName;
-                object value = command.ExecuteScalar();
-                return value == null ? 0L : Convert.ToInt64(value);
-            }
-        }
-
-        private string GetIdColumnName(string tableName)
-        {
-            return string.Equals(tableName, "SkuTable", StringComparison.OrdinalIgnoreCase) ? "SkuId" : "ShopId";
-        }
-
-        private string NormalizeId(string value)
-        {
-            return string.IsNullOrEmpty(value) ? string.Empty : value.Trim();
-        }
-
-        private SQLiteConnection OpenConnection()
-        {
-            SQLiteConnection connection = new SQLiteConnection("Data Source=" + _dbPath + ";Version=3;");
-            connection.Open();
-            return connection;
-        }
-    }
-
-    internal static class TableFileService
-    {
-        public static List<string> ReadIds(string path)
-        {
-            string extension = Path.GetExtension(path).ToLowerInvariant();
-            if (extension == ".xlsx")
-            {
-                return ReadIdsFromXlsx(path);
-            }
-
-            return ReadIdsFromText(path);
-        }
-
-        public static void WriteIds(string path, IList<string> ids)
-        {
-            string extension = Path.GetExtension(path).ToLowerInvariant();
-            if (extension == ".xlsx")
-            {
-                WriteIdsToXlsx(path, ids);
-                return;
-            }
-
-            StringBuilder builder = new StringBuilder();
-            int i;
-            for (i = 0; i < ids.Count; i++)
-            {
-                builder.AppendLine(ids[i]);
-            }
-
-            File.WriteAllText(path, builder.ToString(), new UTF8Encoding(false));
-        }
-
-        private static List<string> ReadIdsFromText(string path)
-        {
-            string content = TextFileReader.ReadAllText(path);
-            string[] lines = content.Replace("\r", "\n").Split(new char[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            List<string> ids = new List<string>();
-            int i;
-            for (i = 0; i < lines.Length; i++)
-            {
-                string line = lines[i].Trim();
-                if (string.IsNullOrEmpty(line))
-                {
-                    continue;
-                }
-
-                string[] parts = line.Split(new char[] { ',', ';', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length > 0)
-                {
-                    ids.Add(parts[0]);
-                }
-            }
-
-            return ids;
-        }
-
-        private static List<string> ReadIdsFromXlsx(string path)
-        {
-            List<string> ids = new List<string>();
-            using (FileStream stream = File.OpenRead(path))
-            {
-                XSSFWorkbook workbook = new XSSFWorkbook(stream);
-                ISheet sheet = workbook.GetSheetAt(0);
-                int i;
-                for (i = sheet.FirstRowNum; i <= sheet.LastRowNum; i++)
-                {
-                    IRow row = sheet.GetRow(i);
-                    if (row == null)
-                    {
-                        continue;
-                    }
-
-                    ICell cell = row.GetCell(0);
-                    if (cell == null)
-                    {
-                        continue;
-                    }
-
-                    string value = cell.ToString();
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        ids.Add(value.Trim());
-                    }
-                }
-            }
-
-            return ids;
-        }
-
-        private static void WriteIdsToXlsx(string path, IList<string> ids)
-        {
-            XSSFWorkbook workbook = new XSSFWorkbook();
-            ISheet sheet = workbook.CreateSheet("Ids");
-            IRow header = sheet.CreateRow(0);
-            header.CreateCell(0).SetCellValue("Id");
-
-            int i;
-            for (i = 0; i < ids.Count; i++)
-            {
-                IRow row = sheet.CreateRow(i + 1);
-                row.CreateCell(0).SetCellValue(ids[i]);
-            }
-
-            using (FileStream stream = File.Create(path))
-            {
-                workbook.Write(stream);
-            }
-        }
-    }
-
     internal static class ProfitCalculatorService
     {
         public static ProfitEstimate Calculate(AppConfig config, IList<FeeRule> rules, ProfitInput input)
         {
             ProfitEstimate result = new ProfitEstimate();
-            FeeRule rule = AssetCatalogService.FindBestFeeRule(rules, input.CategoryId1, input.CategoryId2);
+            FeeRule rule = AssetCatalogService.FindBestFeeRule(
+                rules,
+                input == null ? null : input.CategoryCandidateIds,
+                input == null ? 0 : input.CategoryId1,
+                input == null ? 0 : input.CategoryId2);
             result.MatchedRule = rule;
 
-            decimal targetProfit = input.TargetProfitPercent > 0 ? input.TargetProfitPercent : config.MinProfitPer;
-            decimal deliveryFee = input.DeliveryFee > 0 ? input.DeliveryFee : config.DeliveryFee;
+            AppConfig safeConfig = config ?? AppConfig.CreateDefault();
+            decimal targetProfit = input.TargetProfitPercent > 0
+                ? input.TargetProfitPercent
+                : ResolveTargetProfitPercent(safeConfig);
+            decimal deliveryFee = input.DeliveryFee > 0 ? input.DeliveryFee : safeConfig.DeliveryFee;
+            decimal commissionPercent = input.PlatformCommissionPercent > 0
+                ? input.PlatformCommissionPercent
+                : ResolvePlatformCommissionPercent(safeConfig);
+            decimal promotionPercent = input.PromotionExpensePercent > 0
+                ? input.PromotionExpensePercent
+                : ResolvePromotionExpensePercent(safeConfig);
             decimal logisticsFee = rule == null ? 0m : ResolveLogisticsFee(rule, input.FulfillmentMode, input.WeightGrams);
             decimal cost = input.SourcePrice + input.OtherCost + deliveryFee + logisticsFee;
-            decimal suggested = RoundMoney(cost * (1m + (targetProfit / 100m)));
+            decimal denominator = 1m - (commissionPercent / 100m) - (promotionPercent / 100m) - (targetProfit / 100m);
+            if (denominator <= 0.05m)
+            {
+                denominator = 0.05m;
+            }
+
+            decimal suggested = RoundMoney(cost / denominator);
             decimal actualSellingPrice = input.ManualSellingPrice > 0 ? input.ManualSellingPrice : suggested;
-            decimal profitAmount = actualSellingPrice - cost;
+            decimal netRevenue = actualSellingPrice * (1m - (commissionPercent / 100m) - (promotionPercent / 100m));
+            decimal profitAmount = netRevenue - cost;
             decimal profitPercent = cost <= 0 ? 0m : RoundMoney((profitAmount / cost) * 100m);
 
             result.LogisticsFee = logisticsFee;
             result.EstimatedCost = RoundMoney(cost);
+            result.PlatformCommissionPercent = commissionPercent;
+            result.PromotionExpensePercent = promotionPercent;
             result.SuggestedSellingPrice = suggested;
             result.ActualSellingPrice = RoundMoney(actualSellingPrice);
             result.ProfitAmount = RoundMoney(profitAmount);
             result.ProfitPercent = profitPercent;
-            result.MeetsPriceFilter = actualSellingPrice >= config.MinPirce && actualSellingPrice <= config.MaxPrice;
-            result.MeetsWeightFilter = input.WeightGrams >= config.MinWeight && input.WeightGrams <= config.MaxWeight;
-            result.MeetsProfitFilter = profitPercent >= config.MinProfitPer;
+            result.MeetsPriceFilter = actualSellingPrice >= safeConfig.MinPirce && actualSellingPrice <= safeConfig.MaxPrice;
+            result.MeetsWeightFilter = input.WeightGrams >= safeConfig.MinWeight && input.WeightGrams <= safeConfig.MaxWeight;
+            result.MeetsProfitFilter = profitPercent >= safeConfig.MinProfitPer;
             result.Notes = BuildNotes(rule, input, targetProfit);
             return result;
+        }
+
+        private static decimal ResolveTargetProfitPercent(AppConfig config)
+        {
+            if (config == null)
+            {
+                return 30m;
+            }
+
+            if (config.TargetProfitPercent > 0)
+            {
+                return config.TargetProfitPercent;
+            }
+
+            if (config.MinProfitPer > 0)
+            {
+                return Math.Max(config.MinProfitPer, 30m);
+            }
+
+            return 30m;
+        }
+
+        private static decimal ResolvePlatformCommissionPercent(AppConfig config)
+        {
+            return config != null && config.PlatformCommissionPercent > 0 ? config.PlatformCommissionPercent : 10m;
+        }
+
+        private static decimal ResolvePromotionExpensePercent(AppConfig config)
+        {
+            return config != null && config.PromotionExpensePercent > 0 ? config.PromotionExpensePercent : 30m;
         }
 
         private static decimal ResolveLogisticsFee(FeeRule rule, string mode, decimal weightGrams)
@@ -651,6 +649,7 @@ namespace LitchiOzonRecovery
         }
     }
 
+/*
     internal sealed class UpdaterService
     {
         private readonly AppPaths _paths;
@@ -674,6 +673,7 @@ namespace LitchiOzonRecovery
         }
     }
 
+*/
     internal static class BrowserBootstrap
     {
         public static CoreWebView2Environment CreateEnvironment(AppPaths paths)
@@ -696,6 +696,7 @@ namespace LitchiOzonRecovery
         }
     }
 
+/*
     internal static class PromptDialog
     {
         public static string Show(IWin32Window owner, string title, string message, string initialValue)
@@ -746,4 +747,5 @@ namespace LitchiOzonRecovery
             return result == DialogResult.OK ? text.Text.Trim() : null;
         }
     }
+*/
 }

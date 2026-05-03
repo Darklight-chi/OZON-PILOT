@@ -35,6 +35,15 @@ namespace LitchiOzonRecovery
         [Category("利润设置"), DisplayName("默认运费")]
         public decimal DeliveryFee { get; set; }
 
+        [Category("利润设置"), DisplayName("平台佣金(%)")]
+        public decimal PlatformCommissionPercent { get; set; }
+
+        [Category("利润设置"), DisplayName("推广费用(%)")]
+        public decimal PromotionExpensePercent { get; set; }
+
+        [Category("利润设置"), DisplayName("目标利润率(%)")]
+        public decimal TargetProfitPercent { get; set; }
+
         [Category("供货筛选"), DisplayName("过滤供货价")]
         public bool IsFilterGmPrice { get; set; }
 
@@ -116,6 +125,9 @@ namespace LitchiOzonRecovery
         [Category("更新设置"), DisplayName("自动更新配置")]
         public string AutoUp { get; set; }
 
+        [Browsable(false)]
+        public string UiLanguage { get; set; }
+
         public static AppConfig CreateDefault()
         {
             return new AppConfig
@@ -130,6 +142,9 @@ namespace LitchiOzonRecovery
                 MaxGmNum = 50,
                 MinProfitPer = 20m,
                 DeliveryFee = 3m,
+                PlatformCommissionPercent = 10m,
+                PromotionExpensePercent = 30m,
+                TargetProfitPercent = 30m,
                 IsAutoProfit = true,
                 IsExtendShop = true,
                 IsFilterRate4 = true,
@@ -138,6 +153,7 @@ namespace LitchiOzonRecovery
                 ShopSaleSkuMin = 100,
                 ShopSaleSkuMax = 1000,
                 ZNPer = 40m,
+                UiLanguage = "zh",
                 BlackShops = new List<string>(),
                 FilterCategoryIds = new List<long>()
             };
@@ -197,6 +213,7 @@ namespace LitchiOzonRecovery
     public sealed class CategoryNode
     {
         public string DescriptionCategoryId { get; set; }
+        public string UploadCategoryId { get; set; }
         public string DescriptionCategoryName { get; set; }
         public string DescriptionTypeId { get; set; }
         public string DescriptionTypeName { get; set; }
@@ -224,20 +241,27 @@ namespace LitchiOzonRecovery
         public AppConfig Config { get; set; }
         public List<CategoryNode> Categories { get; set; }
         public List<FeeRule> FeeRules { get; set; }
-        public Dictionary<string, long> TableCounts { get; set; }
     }
 
     public sealed class ProfitInput
     {
         public long CategoryId1 { get; set; }
         public long CategoryId2 { get; set; }
+        public List<long> CategoryCandidateIds { get; set; }
         public decimal SourcePrice { get; set; }
         public decimal WeightGrams { get; set; }
         public decimal DeliveryFee { get; set; }
         public decimal OtherCost { get; set; }
+        public decimal PlatformCommissionPercent { get; set; }
+        public decimal PromotionExpensePercent { get; set; }
         public decimal TargetProfitPercent { get; set; }
         public decimal ManualSellingPrice { get; set; }
         public string FulfillmentMode { get; set; }
+
+        public ProfitInput()
+        {
+            CategoryCandidateIds = new List<long>();
+        }
     }
 
     public sealed class ProfitEstimate
@@ -245,6 +269,8 @@ namespace LitchiOzonRecovery
         public FeeRule MatchedRule { get; set; }
         public decimal LogisticsFee { get; set; }
         public decimal EstimatedCost { get; set; }
+        public decimal PlatformCommissionPercent { get; set; }
+        public decimal PromotionExpensePercent { get; set; }
         public decimal SuggestedSellingPrice { get; set; }
         public decimal ActualSellingPrice { get; set; }
         public decimal ProfitAmount { get; set; }

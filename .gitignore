@@ -1,4 +1,6 @@
 dist/
+.build/
+.tools/
 browser-profile/
 browser-profile-test/
 baseline/
